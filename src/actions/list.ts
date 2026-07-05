@@ -5,6 +5,7 @@ import { listQuerySchema } from '../validation'
 export function list() {
   return defineAction({
     method: 'get',
+    kind: 'list',
     validators: [zValidator('query', listQuerySchema)],
     handler: async ({ c, context }) => {
       const query = listQuerySchema.parse(c.req.query())

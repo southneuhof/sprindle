@@ -1,9 +1,10 @@
 import type { Hono } from 'hono'
 import { isModelAction } from './action-types'
+import type { ModelAction } from './action-types'
 import type { ModelRuntimeContext } from '../source'
 
 export type ActionTree<TContext extends ModelRuntimeContext = ModelRuntimeContext> = {
-  [key: string]: ActionTree<TContext> | import('./action-types').ModelAction<TContext>
+  [key: string]: ActionTree<TContext> | ModelAction<TContext>
 }
 
 export type CompileActionTreeConfig<TContext extends ModelRuntimeContext> = {

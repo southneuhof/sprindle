@@ -1,6 +1,6 @@
 export { compileActionTree } from './action-tree'
 export type { ActionTree, CompileActionTreeConfig } from './action-tree'
-export { bindDomainDatabase, createEntity, defineDomainSchema, isDomainEntity } from './domain-schema'
+export { bindDomainDatabase, createEntity, defineDomainSchema, defineEntitySchemas, isDomainEntity } from './domain-schema'
 export type { DomainEntity, DomainSchema } from './domain-schema'
 export { defineModel } from './define-model'
 export type { DefinedModel, DefineModelConfig } from './define-model'

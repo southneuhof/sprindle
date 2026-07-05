@@ -6,6 +6,7 @@ export function update() {
   return defineAction({
     method: 'patch',
     path: '/:id',
+    kind: 'update',
     validators: [zValidator('param', idParamSchema)],
     handler: async ({ c, context }) => {
       try {

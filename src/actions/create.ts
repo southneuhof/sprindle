@@ -3,6 +3,7 @@ import { defineAction } from './define-action'
 export function create() {
   return defineAction({
     method: 'post',
+    kind: 'create',
     handler: async ({ c, context }) => {
       try {
         const data = await context.entity.source.create({ input: await c.req.json(), context })

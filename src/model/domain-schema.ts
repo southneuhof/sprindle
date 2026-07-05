@@ -63,6 +63,10 @@ export function createEntity<TTable, TSchemas extends EntitySchemas>(config: Cre
   }
 }
 
+export function defineEntitySchemas<const TSchemas extends EntitySchemas>(schemas: TSchemas): TSchemas {
+  return schemas
+}
+
 export function isDomainEntity(value: unknown): value is DomainEntity {
   return Boolean(value && typeof value === 'object' && (value as { [ENTITY_MARK]?: true })[ENTITY_MARK])
 }

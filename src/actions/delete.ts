@@ -6,6 +6,7 @@ export function deleteAction() {
   return defineAction({
     method: 'delete',
     path: '/:id',
+    kind: 'delete',
     validators: [zValidator('param', idParamSchema)],
     handler: async ({ c, context }) => {
       const deleted = await context.entity.source.delete({ id: idParamSchema.parse(c.req.param()).id, context })

@@ -6,6 +6,7 @@ export function detail() {
   return defineAction({
     method: 'get',
     path: '/:id',
+    kind: 'detail',
     validators: [zValidator('param', idParamSchema)],
     handler: async ({ c, context }) => {
       const record = await context.entity.source.detail({ id: idParamSchema.parse(c.req.param()).id, context })
