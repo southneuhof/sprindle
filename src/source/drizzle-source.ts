@@ -64,13 +64,13 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
 }: CreateDrizzleSourceConfig<TRecord, TCreate, TUpdate>): ModelSource<TRecord> {
   const database = db as DrizzleDb
   const primaryKey = getPrimaryKeyEntries(table)
-  const primaryKeyColumns = primaryKey.map((entry) => entry.column)
   const tableColumns = getTableColumns(table as never) as Record<string, AnyColumn>
   const tableKey = entity && domainSchema?.tableKeyByEntity.get(entity)
-  const relationMetadata = entity ? (domainSchema?.relationMetadataByEntity.get(entity) ?? []) : []
-  const relationFields = relationMetadata.map((relation) => relation.field)
-  const relationByField = new Map(relationMetadata.map((relation) => [relation.field, relation]))
-  const withRelations = relationFields.length ? Object.fromEntries(relationFields.map((field) => [field, true])) : undefined
+  const readRelations = entity ? (domainSchema?.relationMetadataByEntity.get(entity) ?? []) : []
+  const writeRelations = entity ? (domainSchema?.writeRelationMetadataByEntity.get(entity) ?? readRelations) : []
+  const readRelationFields = readRelations.map((relation) => relation.field)
+  const relationByField = new Map(writeRelations.map((relation) => [relation.field, relation]))
+  const withRelations = readRelationFields.length ? Object.fromEntries(readRelationFields.map((field) => [field, true])) : undefined
   const wherePrimaryKey = (id: unknown) => {
     const values = primaryKey.length === 1 ? { [primaryKey[0].key]: id } : parseCompositeId(id)
     return and(...primaryKey.map(({ key, column }) => eq(column, values[key])))
@@ -80,28 +80,36 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
     return parseCompositeId(id)
   }
 
+  const materialize = async (input: unknown | unknown[]): Promise<TRecord | TRecord[]> => {
+    if (Array.isArray(input)) return Promise.all(input.map((row) => materializeOne(row)))
+    return materializeOne(input)
+  }
+  const materializeOne = async (row: unknown): Promise<TRecord> => {
+    if (!tableKey || !withRelations) return schemas.select.parse(row)
+    const id = getRowId(row, primaryKey)
+    const hydrated = await database.query?.[tableKey]?.findFirst({ where: wherePrimaryKeyObject(id), with: withRelations })
+    if (!hydrated) throw new Error(`Record not found while materializing table "${tableKey}".`)
+    return schemas.select.parse(hydrated)
+  }
+
   return {
     async list() {
-      const rows = tableKey && withRelations ? await database.query?.[tableKey]?.findMany({ with: withRelations }) : await database.select().from(table)
+      const rows = await database.select().from(table)
       if (!rows) throw new Error(`Drizzle relational query not found for table "${tableKey}".`)
-      return { data: rows.map((row) => schemas.select.parse(row)) }
+      return { data: (await materialize(rows)) as TRecord[] }
     },
     async detail({ id }) {
-      if (tableKey && withRelations) {
-        const row = await database.query?.[tableKey]?.findFirst({ where: wherePrimaryKeyObject(id), with: withRelations })
-        return row ? schemas.select.parse(row) : null
-      }
       const rows = await database.select().from(table).where(wherePrimaryKey(id)).limit(1)
-      return rows[0] ? schemas.select.parse(rows[0]) : null
+      return rows[0] ? ((await materialize(rows[0])) as TRecord) : null
     },
     async create({ input }) {
       const { row, relations } = splitRelationInput(schemas.create.parse(input), relationByField)
       applyOneRelationValues(row, relations, tableColumns)
       const rows = await database.insert(table).values(row).returning()
       if (rows[0]) {
-        const id = getReturnedId(rows[0], primaryKeyColumns)
+        const id = getReturnedId(rows[0], primaryKey)
         await applyManyRelationValues(database, id, relations, primaryKey, tableColumns)
-        if (tableKey && withRelations) return this.detail({ id: id as never, context: undefined as never }) as Promise<TRecord>
+        return (await materialize(rows[0])) as TRecord
       }
       return schemas.select.parse(rows[0])
     },
@@ -113,13 +121,16 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
         : await database.select().from(table).where(wherePrimaryKey(id)).limit(1)
       if (rows[0]) {
         await applyManyRelationValues(database, id, relations, primaryKey, tableColumns)
-        if (tableKey && withRelations) return this.detail({ id, context: undefined as never }) as Promise<TRecord>
+        return (await materialize(rows[0])) as TRecord
       }
       return rows[0] ? schemas.select.parse(rows[0]) : null
     },
     async delete({ id }) {
       const rows = await database.delete(table).where(wherePrimaryKey(id)).returning()
       return Boolean(rows[0])
+    },
+    async materialize(input) {
+      return materialize(input)
     },
   }
 }
@@ -164,12 +175,17 @@ async function applyManyRelationValues(
     if (!relation.isArray) continue
     if (!Array.isArray(value)) throw validationError(`Relation "${field}" must be an array.`)
 
+    if (relation.mode === 'through') {
+      await applyThroughManyRelationValue(database, ownerId, relation, value, primaryKey, tableColumns)
+      continue
+    }
+
     const ownerColumn = onlyColumn(relation.sourceColumns, field)
     const childFkColumn = onlyColumn(relation.targetColumns, field)
     const childPk = onlyEntry(getPrimaryKeyEntries(relation.targetEntity.table), field)
     const ownerValue = getOwnerColumnValue(ownerId, primaryKey, getColumnKey(tableColumns, ownerColumn))
     const childFkKey = getColumnKey(getTableColumns(relation.targetEntity.table as never) as Record<string, AnyColumn>, childFkColumn)
-    const selectedIds = value.map((item) => getInputColumnValue(relation.targetEntity.table, childPk.column, item, field))
+    const selectedIds = unique(value.map((item) => getInputColumnValue(relation.targetEntity.table, childPk.column, item, field)))
 
     if (!selectedIds.length) {
       if (childFkColumn.notNull) throw validationError(`Relation "${field}" cannot be cleared because "${childFkKey}" is not nullable.`)
@@ -193,6 +209,35 @@ async function applyManyRelationValues(
       .update(relation.targetEntity.table)
       .set({ [childFkKey]: ownerValue })
       .where(inArray(childPk.column, selectedIds))
+      .returning()
+  }
+}
+
+async function applyThroughManyRelationValue(
+  database: DrizzleDb,
+  ownerId: unknown,
+  relation: DomainRelationField,
+  value: unknown[],
+  primaryKey: { key: string; column: AnyColumn }[],
+  tableColumns: Record<string, AnyColumn>,
+) {
+  if (!relation.throughTable || !relation.throughSourceColumns || !relation.throughTargetColumns) throw validationError(`Relation "${relation.field}" through metadata is incomplete.`)
+
+  const ownerColumn = onlyColumn(relation.sourceColumns, relation.field)
+  const targetColumn = onlyColumn(relation.targetColumns, relation.field)
+  const throughSourceColumn = onlyColumn(relation.throughSourceColumns, relation.field)
+  const throughTargetColumn = onlyColumn(relation.throughTargetColumns, relation.field)
+  const throughColumns = getTableColumns(relation.throughTable as never) as Record<string, AnyColumn>
+  const throughSourceKey = getColumnKey(throughColumns, throughSourceColumn)
+  const throughTargetKey = getColumnKey(throughColumns, throughTargetColumn)
+  const ownerValue = getOwnerColumnValue(ownerId, primaryKey, getColumnKey(tableColumns, ownerColumn))
+  const selectedIds = unique(value.map((item) => getInputColumnValue(relation.targetEntity.table, targetColumn, item, relation.field)))
+
+  await database.delete(relation.throughTable).where(eq(throughSourceColumn, ownerValue)).returning()
+  if (selectedIds.length) {
+    await database
+      .insert(relation.throughTable)
+      .values(selectedIds.map((selectedId) => ({ [throughSourceKey]: ownerValue, [throughTargetKey]: selectedId })))
       .returning()
   }
 }
@@ -223,6 +268,10 @@ function getInputColumnValue(table: unknown, column: AnyColumn, input: unknown, 
 function getOwnerColumnValue(ownerId: unknown, primaryKey: { key: string; column: AnyColumn }[], ownerKey: string) {
   if (primaryKey.length === 1) return ownerId
   return parseCompositeId(ownerId)[ownerKey]
+}
+
+function unique(values: unknown[]) {
+  return [...new Set(values)]
 }
 
 function validationError(message: string): ValidationError {
@@ -267,10 +316,14 @@ function parseCompositeId(id: unknown): Record<string, unknown> {
   throw new Error('Composite primary key id must be an object or JSON object string')
 }
 
-function getReturnedId(row: unknown, primaryKey: AnyColumn[]) {
+function getReturnedId(row: unknown, primaryKey: { key: string; column: AnyColumn }[]) {
+  return getRowId(row, primaryKey)
+}
+
+function getRowId(row: unknown, primaryKey: { key: string; column: AnyColumn }[]) {
   if (!row || typeof row !== 'object') return undefined
-  if (primaryKey.length === 1) return (row as Record<string, unknown>)[primaryKey[0].name] as string
-  return Object.fromEntries(primaryKey.map((column) => [column.name, (row as Record<string, unknown>)[column.name]]))
+  if (primaryKey.length === 1) return ((row as Record<string, unknown>)[primaryKey[0].key] ?? (row as Record<string, unknown>)[primaryKey[0].column.name]) as string
+  return Object.fromEntries(primaryKey.map(({ key, column }) => [key, (row as Record<string, unknown>)[key] ?? (row as Record<string, unknown>)[column.name]]))
 }
 
 export function createDrizzleModel<TTable, TRecord, TCreate, TUpdate>({

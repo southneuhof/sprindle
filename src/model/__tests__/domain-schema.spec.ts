@@ -1,5 +1,5 @@
 import { defineRelationsPart } from 'drizzle-orm'
-import { pgTable, text } from 'drizzle-orm/pg-core'
+import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createEntity, defineDomainSchema } from '../domain-schema'
@@ -19,6 +19,20 @@ const comments = pgTable('comments', {
   postId: text('post_id'),
 })
 
+const tags = pgTable('tags', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+})
+
+const postTags = pgTable(
+  'post_tags',
+  {
+    postId: text('post_id').notNull(),
+    tagId: text('tag_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.postId, t.tagId] })],
+)
+
 const user = createEntity({
   table: users,
   schemas: {
@@ -37,6 +51,15 @@ const comment = createEntity({
   },
 })
 
+const tag = createEntity({
+  table: tags,
+  schemas: {
+    create: z.object({ id: z.string(), name: z.string() }),
+    update: z.object({ name: z.string() }),
+    select: z.object({ id: z.string(), name: z.string() }),
+  },
+})
+
 const postRelations = defineRelationsPart({ posts, users, comments }, (r) => ({
   posts: {
     author: r.one.users({
@@ -46,6 +69,15 @@ const postRelations = defineRelationsPart({ posts, users, comments }, (r) => ({
     comments: r.many.comments({
       from: r.posts.id,
       to: r.comments.postId,
+    }),
+  },
+}))
+
+const postTagRelations = defineRelationsPart({ posts, users, tags, postTags }, (r) => ({
+  posts: {
+    tags: r.many.tags({
+      from: r.posts.id.through(r.postTags.postId),
+      to: r.tags.id.through(r.postTags.tagId),
     }),
   },
 }))
@@ -92,7 +124,7 @@ function postWithWriteSchemas(select: z.ZodRawShape, create: z.ZodRawShape, upda
 }
 
 function defineWith(post = postWithSelect({ author: user.schemas.select.nullable() }), relations: Record<string, unknown> = postRelations) {
-  return defineDomainSchema([{ users, user }, { posts, post, relations }, { comments, comment }])
+  return defineDomainSchema([{ users, user }, { posts, post, relations }, { comments, comment }, { tags, tag }, { postTags }])
 }
 
 describe('defineDomainSchema', () => {
@@ -106,7 +138,7 @@ describe('defineDomainSchema', () => {
 
     expect(schema.schema).toMatchObject({ users, posts, comments })
     expect(schema.relations.posts).toBeTruthy()
-    expect(schema.entities).toEqual([user, post, comment])
+    expect(schema.entities).toEqual([user, post, comment, tag])
     expect(schema.relationsByTable.has(posts)).toBe(true)
     expect(schema.relationFieldsByEntity.get(post)).toEqual(['author', 'comments'])
     expect(schema.relationMetadataByEntity.get(post)).toMatchObject([
@@ -164,15 +196,29 @@ describe('defineDomainSchema', () => {
     expect(defineWith(post).relationFieldsByEntity.get(post)).toEqual(['author', 'comments'])
   })
 
-  it('rejects create and update relation fields missing from select relations', () => {
+  it('accepts write-only relation fields missing from select relations', () => {
     const post = postWithWriteSchemas({ author: user.schemas.select.nullable() }, { comments: z.array(z.object({ id: z.string() })).optional() })
 
-    expect(() => defineWith(post)).toThrow('Unknown create field "comments"')
+    expect(defineWith(post).writeRelationMetadataByEntity.get(post)).toMatchObject([{ field: 'author' }, { field: 'comments' }])
   })
 
   it('rejects create and update relation cardinality mismatches', () => {
     const post = postWithWriteSchemas({ comments: z.array(comment.schemas.select) }, { comments: z.object({ id: z.string() }).optional() })
 
-    expect(() => defineWith(post)).toThrow('schemas.create.comments must match schemas.select.comments')
+    expect(() => defineWith(post)).toThrow('Drizzle relation "comments" is many')
+  })
+
+  it('infers through relation metadata for many-to-many writes', () => {
+    const post = postWithWriteSchemas({ tags: z.array(tag.schemas.select) }, { tags: z.array(z.object({ id: z.string() })).optional() })
+
+    expect(defineWith(post, postTagRelations).writeRelationMetadataByEntity.get(post)).toMatchObject([
+      {
+        field: 'tags',
+        isArray: true,
+        mode: 'through',
+        targetEntity: tag,
+        throughTable: postTags,
+      },
+    ])
   })
 })

@@ -20,4 +20,5 @@ export type ModelSource<TRecord = unknown> = {
   create: (args: { input: unknown; context: ModelRuntimeContext }) => Promise<TRecord>
   update: (args: { id: string; input: unknown; context: ModelRuntimeContext }) => Promise<TRecord | null | undefined>
   delete: (args: { id: string; context: ModelRuntimeContext }) => Promise<boolean | TRecord | null | undefined>
+  materialize: (input: unknown | unknown[], args: { context: ModelRuntimeContext }) => Promise<TRecord | TRecord[]>
 }

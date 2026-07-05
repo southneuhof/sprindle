@@ -23,6 +23,9 @@ const source: ModelSource<{ id: string }> = {
   async delete() {
     return false
   },
+  async materialize(input) {
+    return input as { id: string }
+  },
 }
 const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 

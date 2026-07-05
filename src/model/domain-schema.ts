@@ -32,8 +32,12 @@ export type DomainRelationField = {
   field: string
   targetEntity: DomainEntity
   isArray: boolean
+  mode: 'direct' | 'through'
   sourceColumns: AnyColumn[]
   targetColumns: AnyColumn[]
+  throughTable?: unknown
+  throughSourceColumns?: AnyColumn[]
+  throughTargetColumns?: AnyColumn[]
 }
 
 export type DomainSchema = {
@@ -43,6 +47,7 @@ export type DomainSchema = {
   relationsByTable: Map<unknown, Record<string, unknown>>
   relationFieldsByEntity: Map<DomainEntity, string[]>
   relationMetadataByEntity: Map<DomainEntity, DomainRelationField[]>
+  writeRelationMetadataByEntity: Map<DomainEntity, DomainRelationField[]>
   tableKeyByEntity: Map<DomainEntity, string>
 }
 
@@ -69,7 +74,9 @@ export function defineDomainSchema(modules: DomainModule[]): DomainSchema {
   const relationsByTable = new Map<unknown, Record<string, unknown>>()
   const relationFieldsByEntity = new Map<DomainEntity, string[]>()
   const relationMetadataByEntity = new Map<DomainEntity, DomainRelationField[]>()
+  const writeRelationMetadataByEntity = new Map<DomainEntity, DomainRelationField[]>()
   const tableKeyByEntity = new Map<DomainEntity, string>()
+  const entityByTable = new Map<unknown, DomainEntity>()
   const entityBySelectSchema = new Map<unknown, DomainEntity>()
 
   for (const module of modules) {
@@ -86,6 +93,7 @@ export function defineDomainSchema(modules: DomainModule[]): DomainSchema {
   }
 
   for (const entity of entities) {
+    entityByTable.set(entity.table, entity)
     entityBySelectSchema.set(entity.schemas.select, entity)
     const tableKey = Object.entries(schema).find(([, table]) => table === entity.table)?.[0]
     if (!tableKey) throw new Error(`Missing Drizzle table export for entity "${entity.name}".`)
@@ -97,15 +105,16 @@ export function defineDomainSchema(modules: DomainModule[]): DomainSchema {
   }
 
   for (const entity of entities) {
-    const relationMetadata = validateEntityRelations({ entity, relationsByTable, entityBySelectSchema })
+    const { readRelations, writeRelations } = validateEntityRelations({ entity, relationsByTable, entityBySelectSchema, entityByTable })
     relationFieldsByEntity.set(
       entity,
-      relationMetadata.map((relation) => relation.field),
+      readRelations.map((relation) => relation.field),
     )
-    relationMetadataByEntity.set(entity, relationMetadata)
+    relationMetadataByEntity.set(entity, readRelations)
+    writeRelationMetadataByEntity.set(entity, writeRelations)
   }
 
-  return { schema, relations, entities, relationsByTable, relationFieldsByEntity, relationMetadataByEntity, tableKeyByEntity }
+  return { schema, relations, entities, relationsByTable, relationFieldsByEntity, relationMetadataByEntity, writeRelationMetadataByEntity, tableKeyByEntity }
 }
 
 export function bindDomainDatabase(domainSchema: DomainSchema, db: unknown) {
@@ -124,12 +133,14 @@ function validateEntityRelations({
   entity,
   relationsByTable,
   entityBySelectSchema,
+  entityByTable,
 }: {
   entity: DomainEntity
   relationsByTable: Map<unknown, Record<string, unknown>>
   entityBySelectSchema: Map<unknown, DomainEntity>
+  entityByTable: Map<unknown, DomainEntity>
 }) {
-  const relationFields: DomainRelationField[] = []
+  const readRelations: DomainRelationField[] = []
   const columns = getTableColumns(entity.table as never) as Record<string, unknown>
   const relations = relationsByTable.get(entity.table) ?? {}
   const aliases = new Map(
@@ -163,43 +174,86 @@ function validateEntityRelations({
       throw new Error(`Target entity mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" targets table "${getTableName(targetTable as never)}".\nschemas.select.${field} uses entity "${nested.entity.name}".`)
     }
 
-    relationFields.push({
-      field,
-      targetEntity: nested.entity,
-      isArray: nested.isArray,
-      sourceColumns: getRelationColumns(relation, 'sourceColumns', field, entity.name),
-      targetColumns: getRelationColumns(relation, 'targetColumns', field, entity.name),
-    })
+    readRelations.push(createRelationField({ field, relation, targetEntity: nested.entity, isArray: nested.isArray, entityName: entity.name }))
   }
 
-  validateWriteSchema({ entity, schemaName: 'create', columns, relationFields })
-  validateWriteSchema({ entity, schemaName: 'update', columns, relationFields })
+  const writeRelations = new Map(readRelations.map((relation) => [relation.field, relation]))
+  for (const relation of [
+    ...validateWriteSchema({ entity, schemaName: 'create', columns, relations, entityByTable }),
+    ...validateWriteSchema({ entity, schemaName: 'update', columns, relations, entityByTable }),
+  ]) {
+    writeRelations.set(relation.field, relation)
+  }
 
-  return relationFields
+  return { readRelations, writeRelations: [...writeRelations.values()] }
 }
 
 function validateWriteSchema({
   entity,
   schemaName,
   columns,
-  relationFields,
+  relations,
+  entityByTable,
 }: {
   entity: DomainEntity
   schemaName: 'create' | 'update'
   columns: Record<string, unknown>
-  relationFields: DomainRelationField[]
+  relations: Record<string, unknown>
+  entityByTable: Map<unknown, DomainEntity>
 }) {
-  const relations = new Map(relationFields.map((relation) => [relation.field, relation]))
+  const relationFields: DomainRelationField[] = []
   for (const [field, schema] of Object.entries(getZodShape(entity.schemas[schemaName]))) {
     if (field in columns) continue
 
-    const relation = relations.get(field)
-    if (!relation) throw new Error(`Unknown ${schemaName} field "${field}" on entity "${entity.name}".\n\nNested write fields must match a relation in schemas.select.`)
+    const relation = relations[field]
+    if (!relation) throw new Error(`Unknown ${schemaName} field "${field}" on entity "${entity.name}".\n\nNested write fields must match a Drizzle relation.`)
 
     const isArray = isZodArray(unwrapZod(schema))
-    if (relation.isArray !== isArray) {
-      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nschemas.${schemaName}.${field} must match schemas.select.${field}.`)
+    if (isArray && !is(relation, Many)) {
+      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" is one, but schemas.${schemaName}.${field} is an array.`)
     }
+    if (!isArray && !is(relation, One)) {
+      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" is many, but schemas.${schemaName}.${field} is not an array.`)
+    }
+
+    const targetTable = (relation as { targetTable?: unknown }).targetTable
+    const targetEntity = entityByTable.get(targetTable)
+    if (!targetEntity) throw new Error(`Target entity missing for relation "${field}" on entity "${entity.name}".`)
+
+    relationFields.push(createRelationField({ field, relation, targetEntity, isArray, entityName: entity.name }))
+  }
+  return relationFields
+}
+
+function createRelationField({
+  field,
+  relation,
+  targetEntity,
+  isArray,
+  entityName,
+}: {
+  field: string
+  relation: unknown
+  targetEntity: DomainEntity
+  isArray: boolean
+  entityName: string
+}): DomainRelationField {
+  const throughTable = (relation as { throughTable?: unknown }).throughTable
+  const through = (relation as { through?: { source: unknown[]; target: unknown[] } }).through
+  return {
+    field,
+    targetEntity,
+    isArray,
+    mode: throughTable ? 'through' : 'direct',
+    sourceColumns: getRelationColumns(relation, 'sourceColumns', field, entityName),
+    targetColumns: getRelationColumns(relation, 'targetColumns', field, entityName),
+    ...(throughTable
+      ? {
+          throughTable,
+          throughSourceColumns: getThroughColumns(through?.source, field, entityName),
+          throughTargetColumns: getThroughColumns(through?.target, field, entityName),
+        }
+      : {}),
   }
 }
 
@@ -207,6 +261,13 @@ function getRelationColumns(relation: unknown, key: 'sourceColumns' | 'targetCol
   const columns = (relation as { [K in typeof key]?: AnyColumn[] })[key]
   if (!columns?.length) throw new Error(`Missing ${key} for relation "${field}" on entity "${entityName}".`)
   return columns
+}
+
+function getThroughColumns(columns: unknown[] | undefined, field: string, entityName: string): AnyColumn[] {
+  if (!columns?.length) throw new Error(`Missing through columns for relation "${field}" on entity "${entityName}".`)
+  const resolved = columns.map((column) => (column as { _?: { column?: AnyColumn } })._?.column)
+  if (resolved.some((column) => !column)) throw new Error(`Invalid through columns for relation "${field}" on entity "${entityName}".`)
+  return resolved as AnyColumn[]
 }
 
 function getNestedEntitySchema(schema: unknown, entityBySelectSchema: Map<unknown, DomainEntity>) {
@@ -277,5 +338,5 @@ function unboundSource(): ModelSource {
   const fail = async () => {
     throw new Error('Domain database is not bound. Call bindDomainDatabase() before model actions run.')
   }
-  return { list: fail, detail: fail, create: fail, update: fail, delete: fail }
+  return { list: fail, detail: fail, create: fail, update: fail, delete: fail, materialize: fail }
 }
