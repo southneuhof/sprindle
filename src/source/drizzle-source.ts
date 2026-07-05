@@ -1,7 +1,7 @@
-import { and, eq, getTableColumns, getTableName, Table } from 'drizzle-orm'
+import { and, eq, getTableColumns, getTableName, inArray, notInArray, Table } from 'drizzle-orm'
 import type { AnyColumn } from 'drizzle-orm'
 import { PrimaryKeyBuilder } from 'drizzle-orm/pg-core'
-import type { DomainEntity, DomainSchema } from '../model/domain-schema'
+import type { DomainEntity, DomainRelationField, DomainSchema } from '../model/domain-schema'
 import type { ModelRuntimeEntity, ModelSource } from './model-source'
 
 const tableSymbols = (Table as unknown as { Symbol: Record<'ExtraConfigBuilder' | 'ExtraConfigColumns', symbol> }).Symbol
@@ -18,7 +18,7 @@ type DrizzleDb = {
     from: (table: unknown) => {
       where: (condition: unknown) => {
         limit: (limit: number) => Promise<unknown[]>
-      }
+      } & PromiseLike<unknown[]>
     } & PromiseLike<unknown[]>
   }
   insert: (table: unknown) => {
@@ -39,6 +39,9 @@ type DrizzleDb = {
     }
   }
 }
+
+type ValidationError = Error & { status: 400; code: 'validation_error' }
+type RelationWrite = { relation: DomainRelationField; value: unknown }
 
 export type CreateDrizzleSourceConfig<TRecord, TCreate, TUpdate> = {
   db: unknown
@@ -62,8 +65,11 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
   const database = db as DrizzleDb
   const primaryKey = getPrimaryKeyEntries(table)
   const primaryKeyColumns = primaryKey.map((entry) => entry.column)
+  const tableColumns = getTableColumns(table as never) as Record<string, AnyColumn>
   const tableKey = entity && domainSchema?.tableKeyByEntity.get(entity)
-  const relationFields = entity ? (domainSchema?.relationFieldsByEntity.get(entity) ?? []) : []
+  const relationMetadata = entity ? (domainSchema?.relationMetadataByEntity.get(entity) ?? []) : []
+  const relationFields = relationMetadata.map((relation) => relation.field)
+  const relationByField = new Map(relationMetadata.map((relation) => [relation.field, relation]))
   const withRelations = relationFields.length ? Object.fromEntries(relationFields.map((field) => [field, true])) : undefined
   const wherePrimaryKey = (id: unknown) => {
     const values = primaryKey.length === 1 ? { [primaryKey[0].key]: id } : parseCompositeId(id)
@@ -89,13 +95,26 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       return rows[0] ? schemas.select.parse(rows[0]) : null
     },
     async create({ input }) {
-      const rows = await database.insert(table).values(schemas.create.parse(input)).returning()
-      if (rows[0] && tableKey && withRelations) return this.detail({ id: getReturnedId(rows[0], primaryKeyColumns) as never, context: undefined as never }) as Promise<TRecord>
+      const { row, relations } = splitRelationInput(schemas.create.parse(input), relationByField)
+      applyOneRelationValues(row, relations, tableColumns)
+      const rows = await database.insert(table).values(row).returning()
+      if (rows[0]) {
+        const id = getReturnedId(rows[0], primaryKeyColumns)
+        await applyManyRelationValues(database, id, relations, primaryKey, tableColumns)
+        if (tableKey && withRelations) return this.detail({ id: id as never, context: undefined as never }) as Promise<TRecord>
+      }
       return schemas.select.parse(rows[0])
     },
     async update({ id, input }) {
-      const rows = await database.update(table).set(schemas.update.parse(input)).where(wherePrimaryKey(id)).returning()
-      if (rows[0] && tableKey && withRelations) return this.detail({ id, context: undefined as never }) as Promise<TRecord>
+      const { row, relations } = splitRelationInput(schemas.update.parse(input), relationByField)
+      applyOneRelationValues(row, relations, tableColumns)
+      const rows = hasKeys(row)
+        ? await database.update(table).set(row).where(wherePrimaryKey(id)).returning()
+        : await database.select().from(table).where(wherePrimaryKey(id)).limit(1)
+      if (rows[0]) {
+        await applyManyRelationValues(database, id, relations, primaryKey, tableColumns)
+        if (tableKey && withRelations) return this.detail({ id, context: undefined as never }) as Promise<TRecord>
+      }
       return rows[0] ? schemas.select.parse(rows[0]) : null
     },
     async delete({ id }) {
@@ -103,6 +122,111 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       return Boolean(rows[0])
     },
   }
+}
+
+function hasKeys(value: unknown) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length)
+}
+
+function splitRelationInput(input: unknown, relationByField: Map<string, DomainRelationField>) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { row: input, relations: [] as RelationWrite[] }
+
+  const row: Record<string, unknown> = {}
+  const relations: RelationWrite[] = []
+  for (const [key, value] of Object.entries(input)) {
+    const relation = relationByField.get(key)
+    if (relation) relations.push({ relation, value })
+    else row[key] = value
+  }
+  return { row, relations }
+}
+
+function applyOneRelationValues(row: unknown, relations: RelationWrite[], tableColumns: Record<string, AnyColumn>) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return
+  for (const { relation, value } of relations) {
+    if (relation.isArray) continue
+    const sourceColumn = onlyColumn(relation.sourceColumns, relation.field)
+    const sourceKey = getColumnKey(tableColumns, sourceColumn)
+    if (value == null && sourceColumn.notNull) throw validationError(`Relation "${relation.field}" cannot be null because "${sourceKey}" is not nullable.`)
+    ;(row as Record<string, unknown>)[sourceKey] = value == null ? null : getInputColumnValue(relation.targetEntity.table, onlyColumn(relation.targetColumns, relation.field), value, relation.field)
+  }
+}
+
+async function applyManyRelationValues(
+  database: DrizzleDb,
+  ownerId: unknown,
+  relations: RelationWrite[],
+  primaryKey: { key: string; column: AnyColumn }[],
+  tableColumns: Record<string, AnyColumn>,
+) {
+  for (const { relation, value } of relations) {
+    const field = relation.field
+    if (!relation.isArray) continue
+    if (!Array.isArray(value)) throw validationError(`Relation "${field}" must be an array.`)
+
+    const ownerColumn = onlyColumn(relation.sourceColumns, field)
+    const childFkColumn = onlyColumn(relation.targetColumns, field)
+    const childPk = onlyEntry(getPrimaryKeyEntries(relation.targetEntity.table), field)
+    const ownerValue = getOwnerColumnValue(ownerId, primaryKey, getColumnKey(tableColumns, ownerColumn))
+    const childFkKey = getColumnKey(getTableColumns(relation.targetEntity.table as never) as Record<string, AnyColumn>, childFkColumn)
+    const selectedIds = value.map((item) => getInputColumnValue(relation.targetEntity.table, childPk.column, item, field))
+
+    if (!selectedIds.length) {
+      if (childFkColumn.notNull) throw validationError(`Relation "${field}" cannot be cleared because "${childFkKey}" is not nullable.`)
+      await database.update(relation.targetEntity.table).set({ [childFkKey]: null }).where(eq(childFkColumn, ownerValue)).returning()
+      continue
+    }
+
+    if (childFkColumn.notNull) {
+      const rows = await database.select().from(relation.targetEntity.table).where(eq(childFkColumn, ownerValue))
+      const staleRows = rows.filter((row) => !selectedIds.includes((row as Record<string, unknown>)[childPk.key]))
+      if (staleRows.length) throw validationError(`Relation "${field}" cannot remove existing rows because "${childFkKey}" is not nullable.`)
+    } else {
+      await database
+        .update(relation.targetEntity.table)
+        .set({ [childFkKey]: null })
+        .where(and(eq(childFkColumn, ownerValue), notInArray(childPk.column, selectedIds)))
+        .returning()
+    }
+
+    await database
+      .update(relation.targetEntity.table)
+      .set({ [childFkKey]: ownerValue })
+      .where(inArray(childPk.column, selectedIds))
+      .returning()
+  }
+}
+
+function onlyColumn(columns: AnyColumn[], field: string) {
+  if (columns.length !== 1) throw validationError(`Relation "${field}" writes only support single-column relations.`)
+  return columns[0]
+}
+
+function onlyEntry<T>(entries: T[], field: string) {
+  if (entries.length !== 1) throw validationError(`Relation "${field}" writes only support single-column primary keys.`)
+  return entries[0]
+}
+
+function getColumnKey(columns: Record<string, AnyColumn>, column: AnyColumn) {
+  const entry = Object.entries(columns).find(([, candidate]) => candidate === column || candidate.name === column.name)
+  if (!entry) throw validationError(`Column "${column.name}" not found in table metadata.`)
+  return entry[0]
+}
+
+function getInputColumnValue(table: unknown, column: AnyColumn, input: unknown, field: string) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw validationError(`Relation "${field}" value must be an object.`)
+  const key = getColumnKey(getTableColumns(table as never) as Record<string, AnyColumn>, column)
+  if (!(key in input)) throw validationError(`Relation "${field}" value must include "${key}".`)
+  return (input as Record<string, unknown>)[key]
+}
+
+function getOwnerColumnValue(ownerId: unknown, primaryKey: { key: string; column: AnyColumn }[], ownerKey: string) {
+  if (primaryKey.length === 1) return ownerId
+  return parseCompositeId(ownerId)[ownerKey]
+}
+
+function validationError(message: string): ValidationError {
+  return Object.assign(new Error(message), { status: 400 as const, code: 'validation_error' as const })
 }
 
 export function getPrimaryKeyColumns(table: unknown): AnyColumn[] {

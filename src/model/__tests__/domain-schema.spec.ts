@@ -80,6 +80,17 @@ function postWithSelect(select: z.ZodRawShape) {
   })
 }
 
+function postWithWriteSchemas(select: z.ZodRawShape, create: z.ZodRawShape, update: z.ZodRawShape = create) {
+  return createEntity({
+    table: posts,
+    schemas: {
+      create: z.object({ id: z.string(), authorId: z.string().nullable(), ...create }),
+      update: z.object({ authorId: z.string().nullable(), ...update }),
+      select: z.object({ id: z.string(), authorId: z.string().nullable(), ...select }),
+    },
+  })
+}
+
 function defineWith(post = postWithSelect({ author: user.schemas.select.nullable() }), relations: Record<string, unknown> = postRelations) {
   return defineDomainSchema([{ users, user }, { posts, post, relations }, { comments, comment }])
 }
@@ -98,6 +109,10 @@ describe('defineDomainSchema', () => {
     expect(schema.entities).toEqual([user, post, comment])
     expect(schema.relationsByTable.has(posts)).toBe(true)
     expect(schema.relationFieldsByEntity.get(post)).toEqual(['author', 'comments'])
+    expect(schema.relationMetadataByEntity.get(post)).toMatchObject([
+      { field: 'author', isArray: false, targetEntity: user },
+      { field: 'comments', isArray: true, targetEntity: comment },
+    ])
   })
 
   it('rejects createEntity relations input', () => {
@@ -138,5 +153,26 @@ describe('defineDomainSchema', () => {
     const post = postWithSelect({ displayName: z.object({ value: z.string() }) })
 
     expect(() => defineWith(post)).toThrow('Unknown nested object field "displayName"')
+  })
+
+  it('accepts create and update relation fields that match select relations', () => {
+    const post = postWithWriteSchemas(
+      { author: user.schemas.select.nullable(), comments: z.array(comment.schemas.select) },
+      { author: z.object({ id: z.string() }).nullable().optional(), comments: z.array(z.object({ id: z.string() })).optional() },
+    )
+
+    expect(defineWith(post).relationFieldsByEntity.get(post)).toEqual(['author', 'comments'])
+  })
+
+  it('rejects create and update relation fields missing from select relations', () => {
+    const post = postWithWriteSchemas({ author: user.schemas.select.nullable() }, { comments: z.array(z.object({ id: z.string() })).optional() })
+
+    expect(() => defineWith(post)).toThrow('Unknown create field "comments"')
+  })
+
+  it('rejects create and update relation cardinality mismatches', () => {
+    const post = postWithWriteSchemas({ comments: z.array(comment.schemas.select) }, { comments: z.object({ id: z.string() }).optional() })
+
+    expect(() => defineWith(post)).toThrow('schemas.create.comments must match schemas.select.comments')
   })
 })
