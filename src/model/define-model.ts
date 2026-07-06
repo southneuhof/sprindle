@@ -6,7 +6,7 @@ import { normalizePipeline } from '../actions/pipeline'
 
 export type DefineModelConfig<
   TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
-  TActions extends Record<string, unknown> = Record<string, unknown>,
+  TActions extends ActionTree = ActionTree,
 > = {
   entity: TEntity
   actions: TActions
@@ -14,7 +14,7 @@ export type DefineModelConfig<
 
 export type DefinedModel<
   TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
-  TActions extends Record<string, unknown> = Record<string, unknown>,
+  TActions extends ActionTree = ActionTree,
 > = {
   name: string
   route: Hono
@@ -24,7 +24,7 @@ export type DefinedModel<
 
 export function defineModel<
   const TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
-  const TActions extends Record<string, unknown> = Record<string, unknown>,
+  const TActions extends ActionTree = ActionTree,
 >({
   entity,
   actions,

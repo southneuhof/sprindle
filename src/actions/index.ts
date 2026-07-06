@@ -1,6 +1,6 @@
 export { create } from './create'
 export { defineAction } from './define-action'
-export type { ActionFactoryConfigFor, DefineActionConfig } from './define-action'
+export type { ActionConfigFor, ActionFactoryConfigFor, DefineActionConfig, ModelActionFactory } from './define-action'
 export { deleteAction } from './delete'
 export { detail } from './detail'
 export { list } from './list'

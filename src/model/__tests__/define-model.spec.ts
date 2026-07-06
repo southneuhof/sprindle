@@ -5,6 +5,7 @@ import { create, defineAction, list } from '../../actions'
 import { defineModel } from '../define-model'
 import { createDrizzleModel } from '../../source'
 import { getPrimaryKeyColumns } from '../../source/drizzle-source'
+import type { ActionTree } from '../action-tree'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
 
 const source: ModelSource<{ id: string }> = {
@@ -30,6 +31,17 @@ const source: ModelSource<{ id: string }> = {
 const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 
 describe('defineModel route compiler', () => {
+  if (false) {
+    const uncalledAction = defineAction({
+      method: 'get',
+      handler: ({ c }) => c.json({ ok: true }),
+    })
+
+    // @ts-expect-error action factories must be called before registration
+    const tree: ActionTree = { uncalledAction }
+    void tree
+  }
+
   it('compiles action tree keys into route segments', async () => {
     const model = defineModel({
       entity: itemEntity,
@@ -75,7 +87,7 @@ describe('defineModel route compiler', () => {
             order.push(`handler.${state.value}`)
             return c.json({ ok: true })
           },
-        }),
+        })(),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -105,12 +117,12 @@ describe('defineModel route compiler', () => {
           kind: 'custom',
           before: [() => void order.push('first.before')],
           handler: ({ c }) => c.json({ ok: true }),
-        }),
+        })(),
         second: defineAction({
           method: 'get',
           kind: 'custom',
           handler: ({ c }) => c.json({ ok: true }),
-        }),
+        })(),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -139,7 +151,7 @@ describe('defineModel route compiler', () => {
             order.push('handler')
             return c.json({ ok: true })
           },
-        }),
+        })(),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -158,7 +170,7 @@ describe('defineModel route compiler', () => {
           method: 'get',
           validate: [() => ({ field: 'name', message: 'Name is required.' })],
           handler: ({ c }) => c.json({ ok: true }),
-        }),
+        })(),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -179,13 +191,13 @@ describe('defineModel route compiler', () => {
           handler: () => {
             throw new Error('known')
           },
-        }),
+        })(),
         fallsBack: defineAction({
           method: 'get',
           handler: () => {
             throw new Error('unknown')
           },
-        }),
+        })(),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -216,6 +228,29 @@ describe('defineModel route compiler', () => {
     const valid = await app.request('/create', { method: 'POST', body: JSON.stringify({ id: 'item-2' }), headers: { 'Content-Type': 'application/json' } })
     expect(valid.status).toBe(201)
     expect(await valid.json()).toEqual({ data: { id: 'item-1' } })
+  })
+
+  it('accepts forwarded hooks on custom action factories', async () => {
+    const custom = defineAction({
+      method: 'get',
+      before: [({ state }) => ({ value: `${state.value}-base` })],
+      state: () => ({ value: 'state' }),
+      handler: ({ c, state }) => c.json({ value: state.value }),
+    })
+    const model = defineModel({
+      entity: itemEntity,
+      actions: {
+        custom: custom({
+          before: [({ state }) => ({ value: `${state.value}-call` })],
+          validate: [({ state }) => (state.value === 'state-base-call' ? undefined : 'wrong order')],
+        }),
+      },
+    })
+    const app = new Hono().route('/', model.route)
+    const response = await app.request('/custom')
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ value: 'state-base-call' })
   })
 
   it('uses the drizzle table name as the model name', () => {

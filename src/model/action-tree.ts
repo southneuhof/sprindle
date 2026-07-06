@@ -30,8 +30,12 @@ export function compileActionTree<TContext extends ModelRuntimeContext>({
       const segmentPath = `/${[...segments, key].join('/')}`
       const path = `${segmentPath}${boundAction.path}`
       const mount = app[boundAction.method] as (path: string, ...handlers: unknown[]) => Hono
-      mount.call(app, path, ...boundAction.validators, boundAction.handler)
+      mount.call(app, path, ...boundAction.middleware, boundAction.handler)
       continue
+    }
+
+    if (typeof value === 'function') {
+      throw new Error(`Action "${[...segments, key].join('/')}" must be called before registration.`)
     }
 
     if (isPlainObject(value)) {

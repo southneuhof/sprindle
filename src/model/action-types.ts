@@ -44,7 +44,7 @@ export type ActionPipeline<TArgs extends ActionHandlerArgs = ActionHandlerArgs> 
 export type BoundModelAction = {
   method: HttpMethod
   path: string
-  validators: MiddlewareHandler[]
+  middleware: MiddlewareHandler[]
   handler: (c: Context) => Response | Promise<Response>
 }
 
