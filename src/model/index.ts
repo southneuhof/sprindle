@@ -5,5 +5,17 @@ export type { DomainEntity, DomainSchema } from './domain-schema'
 export { defineModel } from './define-model'
 export type { DefinedModel, DefineModelConfig } from './define-model'
 export { isModelAction, MODEL_ACTION } from './action-types'
-export type { BoundModelAction, HttpMethod, ModelAction } from './action-types'
+export type {
+  ActionAfter,
+  ActionAuthorize,
+  ActionBefore,
+  ActionError,
+  ActionHandlerArgs,
+  ActionPipeline,
+  ActionValidate,
+  BoundModelAction,
+  HttpMethod,
+  ModelAction,
+  ValidationIssue,
+} from './action-types'
 export type { ModelRuntimeContext } from './model-context'

@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { compileActionTree, type ActionTree } from './action-tree'
+import type { ActionHandlerArgs, ActionPipeline } from './action-types'
 import type { ModelRuntimeContext, ModelRuntimeEntity } from '../source'
+import { normalizePipeline } from '../actions/pipeline'
 
 export type DefineModelConfig<
   TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
@@ -8,7 +10,7 @@ export type DefineModelConfig<
 > = {
   entity: TEntity
   actions: TActions
-}
+} & ActionPipeline<ActionHandlerArgs<ModelRuntimeContext>>
 
 export type DefinedModel<
   TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
@@ -26,9 +28,14 @@ export function defineModel<
 >({
   entity,
   actions,
+  before,
+  authorize,
+  validate,
+  after,
+  error,
 }: DefineModelConfig<TEntity, TActions>): DefinedModel<TEntity, TActions> {
   const route = new Hono()
-  const context = { name: entity.name, entity } as ModelRuntimeContext
+  const context = { name: entity.name, entity, pipeline: normalizePipeline({ before, authorize, validate, after, error }) } as ModelRuntimeContext
   compileActionTree({ app: route, context, tree: actions as ActionTree })
   return { name: entity.name, route, actions, context }
 }
