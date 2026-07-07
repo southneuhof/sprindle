@@ -1,6 +1,6 @@
 import { defineRelationsPart } from 'drizzle-orm'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import { z } from 'zod'
 import { createEntity, defineDomainPart, defineDomainSchema } from '../domain-schema'
 import type { DefineDomainPartConfig } from '../domain-schema'
@@ -134,6 +134,21 @@ function defineWith(post = postWithSelect({ author: user.schemas.select.nullable
 }
 
 describe('defineDomainSchema', () => {
+  it('preserves inline createEntity schema inference', () => {
+    const entity = createEntity({
+      table: users,
+      schemas: {
+        create: z.object({ id: z.string(), name: z.string() }),
+        update: z.object({ name: z.string().optional() }).extend({ author: z.object({ id: z.string() }).optional() }),
+        select: z.object({ id: z.string(), name: z.string() }),
+      },
+    })
+
+    type UpdateInput = z.input<typeof entity.schemas.update>
+
+    expectTypeOf<UpdateInput>().toEqualTypeOf<{ name?: string; author?: { id: string } }>()
+  })
+
   it('uses declared tables, relation parts, and entities', () => {
     const post = postWithSelect({
       author: user.schemas.select.nullable(),

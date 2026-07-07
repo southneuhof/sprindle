@@ -19,11 +19,11 @@ export type DomainEntity<TTable = unknown, TSchemas extends EntitySchemas = Enti
   table: TTable
 }
 
-type CreateEntityConfig<TTable, TSchemas extends EntitySchemas> = {
+type CreateEntityConfig<TTable, TSchemas> = {
   table: TTable
   schemas: TSchemas
   relations?: never
-}
+} & (TSchemas extends EntitySchemas ? unknown : never)
 
 type RelationConfig = { table: unknown; name?: string; relations: Record<string, unknown> }
 
@@ -58,7 +58,9 @@ export type DomainSchema = {
   tableKeyByEntity: Map<DomainEntity, string>
 }
 
-export function createEntity<TTable, TSchemas extends EntitySchemas>(config: CreateEntityConfig<TTable, TSchemas>): DomainEntity<TTable, TSchemas> {
+export function createEntity<TTable, const TSchemas>(
+  config: CreateEntityConfig<TTable, TSchemas>,
+): TSchemas extends EntitySchemas ? DomainEntity<TTable, TSchemas> : never {
   if ('relations' in (config as Record<string, unknown>)) throw new Error('createEntity() does not accept relations.')
 
   return {
@@ -67,7 +69,7 @@ export function createEntity<TTable, TSchemas extends EntitySchemas>(config: Cre
     table: config.table,
     schemas: config.schemas,
     source: unboundSource(),
-  }
+  } as unknown as TSchemas extends EntitySchemas ? DomainEntity<TTable, TSchemas> : never
 }
 
 export function defineEntitySchemas<const TSchemas extends EntitySchemas>(schemas: TSchemas): TSchemas {
