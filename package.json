@@ -12,6 +12,7 @@
     ".": "./src/index.ts",
     "./actions": "./src/actions/index.ts",
     "./model": "./src/model/index.ts",
+    "./rpc-generator": "./src/rpc-generator.ts",
     "./routes": "./src/routes/index.ts",
     "./source": "./src/source/index.ts",
     "./validation": "./src/validation/index.ts"
@@ -25,6 +26,7 @@
     "@hono/zod-validator": "^0.8.0",
     "drizzle-orm": "1.0.0-rc.4",
     "hono": "^4.12.27",
+    "typescript": "^5.9.3",
     "zod": "^3.25.0"
   },
   "devDependencies": {
