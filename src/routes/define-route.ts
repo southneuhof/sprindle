@@ -2,10 +2,10 @@ import type { Hono } from 'hono'
 import type { Schema } from 'hono'
 import type { DefinedModel } from '../model'
 
-export type ModelRoute<TPath extends string = string> = {
+export type ModelRoute<TPath extends string = string, TModel extends DefinedModel = DefinedModel> = {
   kind: 'model'
   path: TPath
-  model: DefinedModel
+  model: TModel
 }
 
 export type CustomRoute<TPath extends string = string, TRoute extends Hono = Hono> = {
@@ -14,9 +14,9 @@ export type CustomRoute<TPath extends string = string, TRoute extends Hono = Hon
   route: TRoute
 }
 
-export type DefinedRoute = ModelRoute | CustomRoute
+export type DefinedRoute = ModelRoute<string, DefinedModel> | CustomRoute
 
-export function defineRoute<const TPath extends string>(config: { path: TPath; model: DefinedModel; route?: never }): ModelRoute<TPath>
+export function defineRoute<const TPath extends string, const TModel extends DefinedModel>(config: { path: TPath; model: TModel; route?: never }): ModelRoute<TPath, TModel>
 export function defineRoute<const TPath extends string, const TRoute extends Hono>(config: { path: TPath; route: TRoute; model?: never }): CustomRoute<TPath, TRoute>
 export function defineRoute(config: { path: string; model?: DefinedModel; route?: Hono }): DefinedRoute {
   if (config.model) return { kind: 'model', path: config.path, model: config.model }
