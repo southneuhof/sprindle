@@ -2,7 +2,7 @@ import { defineRelationsPart } from 'drizzle-orm'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { createEntity, defineDomainSchema } from '../../model'
+import { createEntity, defineDomainPart, defineDomainSchema } from '../../model'
 import { createDrizzleSource } from '../drizzle-source'
 
 const products = pgTable('products', {
@@ -51,7 +51,10 @@ const relations = defineRelationsPart({ products, variants, productVariants }, (
   },
 }))
 
-const domainSchema = defineDomainSchema([{ products, product, relations }, { variants, variant }, { productVariants }])
+const domainSchema = defineDomainSchema([
+  defineDomainPart({ tables: { products, productVariants }, entities: [product], relations: [relations] }),
+  defineDomainPart({ tables: { variants }, entities: [variant] }),
+])
 
 describe('createDrizzleSource', () => {
   it('writes through-table assignments and materializes target rows', async () => {

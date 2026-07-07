@@ -2,7 +2,8 @@ import { defineRelationsPart } from 'drizzle-orm'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { createEntity, defineDomainSchema } from '../domain-schema'
+import { createEntity, defineDomainPart, defineDomainSchema } from '../domain-schema'
+import type { DefineDomainPartConfig } from '../domain-schema'
 
 const users = pgTable('users', {
   id: text('id').primaryKey(),
@@ -123,12 +124,17 @@ function postWithWriteSchemas(select: z.ZodRawShape, create: z.ZodRawShape, upda
   })
 }
 
-function defineWith(post = postWithSelect({ author: user.schemas.select.nullable() }), relations: Record<string, unknown> = postRelations) {
-  return defineDomainSchema([{ users, user }, { posts, post, relations }, { comments, comment }, { tags, tag }, { postTags }])
+function defineWith(post = postWithSelect({ author: user.schemas.select.nullable() }), relations: NonNullable<DefineDomainPartConfig['relations']>[number] = postRelations) {
+  return defineDomainSchema([
+    defineDomainPart({ tables: { users }, entities: [user] }),
+    defineDomainPart({ tables: { posts }, entities: [post], relations: [relations] }),
+    defineDomainPart({ tables: { comments }, entities: [comment] }),
+    defineDomainPart({ tables: { tags, postTags }, entities: [tag] }),
+  ])
 }
 
 describe('defineDomainSchema', () => {
-  it('discovers tables, relation parts, and entities from module exports', () => {
+  it('uses declared tables, relation parts, and entities', () => {
     const post = postWithSelect({
       author: user.schemas.select.nullable(),
       comments: z.array(z.lazy(() => comment.schemas.select)),
@@ -145,6 +151,16 @@ describe('defineDomainSchema', () => {
       { field: 'author', isArray: false, targetEntity: user },
       { field: 'comments', isArray: true, targetEntity: comment },
     ])
+  })
+
+  it('ignores values that are not declared in a domain part', () => {
+    const schema = defineDomainSchema([
+      defineDomainPart({ tables: { users }, entities: [user] }),
+      { tables: {}, entities: [], user, users } as never,
+    ])
+
+    expect(schema.entities).toEqual([user])
+    expect(schema.schema).toEqual({ users })
   })
 
   it('rejects createEntity relations input', () => {

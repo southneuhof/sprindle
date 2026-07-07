@@ -1,4 +1,4 @@
-import { getTableColumns, getTableName, is, Many, One, Table } from 'drizzle-orm'
+import { getTableColumns, getTableName, is, Many, One } from 'drizzle-orm'
 import type { AnyColumn } from 'drizzle-orm'
 import { createDrizzleSource } from '../source/drizzle-source'
 import type { ModelRuntimeEntity, ModelSource } from '../source/model-source'
@@ -25,8 +25,15 @@ type CreateEntityConfig<TTable, TSchemas extends EntitySchemas> = {
   relations?: never
 }
 
-type DomainModule = Record<string, unknown>
 type RelationConfig = { table: unknown; name?: string; relations: Record<string, unknown> }
+
+export type DefineDomainPartConfig = {
+  tables: Record<string, unknown>
+  entities: readonly DomainEntity[]
+  relations?: readonly Record<string, RelationConfig>[]
+}
+
+export type DomainPart = DefineDomainPartConfig
 
 export type DomainRelationField = {
   field: string
@@ -67,11 +74,15 @@ export function defineEntitySchemas<const TSchemas extends EntitySchemas>(schema
   return schemas
 }
 
+export function defineDomainPart<const TPart extends DefineDomainPartConfig>(config: TPart): TPart {
+  return config
+}
+
 export function isDomainEntity(value: unknown): value is DomainEntity {
   return Boolean(value && typeof value === 'object' && (value as { [ENTITY_MARK]?: true })[ENTITY_MARK])
 }
 
-export function defineDomainSchema(modules: DomainModule[]): DomainSchema {
+export function defineDomainSchema(parts: readonly DomainPart[]): DomainSchema {
   const schema: Record<string, unknown> = {}
   const relations: Record<string, RelationConfig> = {}
   const entities: DomainEntity[] = []
@@ -83,15 +94,13 @@ export function defineDomainSchema(modules: DomainModule[]): DomainSchema {
   const entityByTable = new Map<unknown, DomainEntity>()
   const entityBySelectSchema = new Map<unknown, DomainEntity>()
 
-  for (const module of modules) {
-    for (const [key, value] of Object.entries(module)) {
-      if (isDrizzleTable(value)) schema[key] = value
-      if (isDomainEntity(value)) entities.push(value)
-      if (isRelationConfigMap(value)) {
-        for (const [relationKey, config] of Object.entries(value)) {
-          const previous = relations[relationKey]
-          relations[relationKey] = previous ? { ...config, relations: { ...previous.relations, ...config.relations } } : config
-        }
+  for (const part of parts) {
+    Object.assign(schema, part.tables)
+    entities.push(...part.entities)
+    for (const relationMap of part.relations ?? []) {
+      for (const [relationKey, config] of Object.entries(relationMap)) {
+        const previous = relations[relationKey]
+        relations[relationKey] = previous ? { ...config, relations: { ...previous.relations, ...config.relations } } : config
       }
     }
   }
@@ -100,7 +109,7 @@ export function defineDomainSchema(modules: DomainModule[]): DomainSchema {
     entityByTable.set(entity.table, entity)
     entityBySelectSchema.set(entity.schemas.select, entity)
     const tableKey = Object.entries(schema).find(([, table]) => table === entity.table)?.[0]
-    if (!tableKey) throw new Error(`Missing Drizzle table export for entity "${entity.name}".`)
+    if (!tableKey) throw new Error(`Missing Drizzle table declaration for entity "${entity.name}".`)
     tableKeyByEntity.set(entity, tableKey)
   }
 
@@ -317,25 +326,6 @@ function getZodArrayElement(schema: unknown) {
 
 function getZodDef(schema: unknown): Record<string, unknown> | undefined {
   return ((schema as { _def?: unknown; def?: unknown })?._def ?? (schema as { def?: unknown })?.def) as Record<string, unknown> | undefined
-}
-
-function isDrizzleTable(value: unknown): value is Table {
-  return is(value, Table)
-}
-
-function isRelationConfigMap(value: unknown): value is Record<string, RelationConfig> {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || isDrizzleTable(value)) return false
-  return Object.values(value).some(isRelationConfig)
-}
-
-function isRelationConfig(value: unknown): value is RelationConfig {
-  return Boolean(
-    value &&
-      typeof value === 'object' &&
-      isDrizzleTable((value as RelationConfig).table) &&
-      (value as RelationConfig).relations &&
-      typeof (value as RelationConfig).relations === 'object',
-  )
 }
 
 function unboundSource(): ModelSource {
