@@ -41,6 +41,7 @@ describe('defineModel route compiler', () => {
 
   it('compiles route tree keys into route segments', async () => {
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       routes: {
         list: list(),
@@ -62,6 +63,7 @@ describe('defineModel route compiler', () => {
   it('runs model and route phases in declaration order', async () => {
     const order: string[] = []
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       before: [() => void order.push('model.before')],
       authorize: [() => void order.push('model.authorize')],
@@ -106,6 +108,7 @@ describe('defineModel route compiler', () => {
   it('keeps route phases local to their route', async () => {
     const order: string[] = []
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       before: [({ route }) => void order.push(`model.${route.kind}`)],
       routes: {
@@ -132,6 +135,7 @@ describe('defineModel route compiler', () => {
   it('skips validation, handler, and after when authorize fails', async () => {
     const order: string[] = []
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       routes: {
         locked: defineRoute({
@@ -161,6 +165,7 @@ describe('defineModel route compiler', () => {
 
   it('returns validation errors as bad requests', async () => {
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       routes: {
         invalid: defineRoute({
@@ -179,6 +184,7 @@ describe('defineModel route compiler', () => {
 
   it('maps thrown errors through route and model error phases', async () => {
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       error: [({ c }) => c.json({ error: 'model' }, 500)],
       routes: {
@@ -210,6 +216,7 @@ describe('defineModel route compiler', () => {
 
   it('accepts declarative hooks on first-class route factories', async () => {
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       routes: {
         create: create({
@@ -229,6 +236,7 @@ describe('defineModel route compiler', () => {
 
   it('accepts direct custom routes', async () => {
     const model = defineModel({
+      path: '/items',
       entity: itemEntity,
       routes: {
         custom: defineRoute({

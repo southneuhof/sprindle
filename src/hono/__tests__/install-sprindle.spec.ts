@@ -3,8 +3,7 @@ import { Hono } from 'hono'
 import { z } from 'zod/v4'
 import { create, defineRoute, detail, list, update } from '../../routes'
 import { defineModel } from '../../model'
-import { mountRoute } from '../../routes'
-import { installSprindle, type SprindleMountsSchema } from '..'
+import { installSprindle, type SprindleInstallSchema } from '..'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
 
 const source = {
@@ -32,6 +31,7 @@ const ping = defineRoute({
 })
 
 const model = defineModel({
+  path: '/items',
   entity: item,
   routes: {
     list: list(),
@@ -45,15 +45,15 @@ const model = defineModel({
 })
 
 const health = defineRoute({
+  path: '/health',
   method: 'get',
   action: () => ({ ok: true }),
 })
-const custom = new Hono().get('/', (c) => c.json({ custom: true }))
-const mounts = [mountRoute({ path: '/items', model }), mountRoute({ path: '/health', route: health }), mountRoute({ path: '/custom', route: custom })] as const
+const routes = [model, health] as const
 
 describe('installSprindle', () => {
-  it('mounts routes at runtime', async () => {
-    const app = installSprindle(new Hono(), mounts)
+  it('installs routes at runtime', async () => {
+    const app = installSprindle(new Hono(), routes)
     const response = await app.request('/items/nested/ping')
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ ok: true })
@@ -64,10 +64,10 @@ describe('installSprindle', () => {
   })
 
   it('infers Hono RPC schema from route definitions', () => {
-    type Schema = SprindleMountsSchema<typeof mounts>
+    type Schema = SprindleInstallSchema<typeof routes>
 
-    expectTypeOf<typeof mounts[1]['kind']>().toEqualTypeOf<'route'>()
-    expectTypeOf<typeof mounts[1]['route']['path']>().toEqualTypeOf<''>()
+    expectTypeOf<typeof routes[1]['path']>().toEqualTypeOf<'/health'>()
+    expectTypeOf<typeof routes[0]['path']>().toEqualTypeOf<'/items'>()
     expectTypeOf<Schema['/items/list']['$get']['input']>().toEqualTypeOf<{ query: { page?: string; limit?: string; search?: string } }>()
     expectTypeOf<Schema['/items/detail/:id']['$get']['input']>().toEqualTypeOf<{ param: { id: string } }>()
     expectTypeOf<Schema['/items/create']['$post']['input']>().toEqualTypeOf<{ json: z.input<typeof item.schemas.create> }>()
@@ -75,6 +75,5 @@ describe('installSprindle', () => {
     expectTypeOf<Schema['/items/nested/ping']['$get']['status']>().toEqualTypeOf<200>()
     expectTypeOf<Schema['/items/create']['$post']['status']>().toEqualTypeOf<201>()
     expectTypeOf<Schema['/health']['$get']['status']>().toEqualTypeOf<200>()
-    expectTypeOf<Schema['/custom']['$get']['status']>().toMatchTypeOf<number>()
   })
 })

@@ -1,7 +1,5 @@
 export { defineRoute } from './define-route'
 export type { DefineRouteConfig, ModelRouteFactory, RouteConfigFor, RouteFactoryConfigFor } from './define-route'
-export { mountRoute } from './mount-route'
-export type { HonoRouteMount, HonoRouteMountSchema, ModelRouteMount, MountedRoute, SprindleRouteMount } from './mount-route'
 export { create } from './create'
 export { deleteRoute } from './delete'
 export { detail } from './detail'

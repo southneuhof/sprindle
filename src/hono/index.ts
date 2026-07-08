@@ -1,7 +1,6 @@
-import type { Hono, Schema } from 'hono'
+import type { Hono } from 'hono'
 import type { z } from 'zod/v4'
 import type { DefinedModel, ModelRoute, ModelRuntimeContext } from '../model'
-import type { MountedRoute } from '../routes'
 
 type ListQuery = {
   page?: string
@@ -16,19 +15,22 @@ type JsonEndpoint<TInput, TStatus extends number = 200> = {
   status: TStatus
 }
 
-export type SprindleMountsSchema<TMounts extends readonly MountedRoute[]> = UnionToIntersection<SprindleMountSchema<TMounts[number]>>
+export type SprindleInstallable = DefinedModel | ModelRoute
+export type SprindleInstallSchema<TInstallables extends readonly SprindleInstallable[]> = UnionToIntersection<SprindleSchema<TInstallables[number]>>
 
-type SprindleMountSchema<TMount> =
-  TMount extends { kind: 'hono'; path: infer TPath extends string; route: infer THono extends Hono }
-    ? PrefixSchema<HonoSchema<THono>, TPath>
-    : TMount extends { kind: 'route'; path: infer TPath extends string; route: { method: infer TMethod extends string; path: infer TRoutePath extends string; kind: infer TKind extends string } }
-      ? RouteSchema<unknown, TMethod, TKind, JoinPath<TPath, TRoutePath>>
-    : TMount extends { kind: 'model'; path: infer TPath extends string; model: infer TModel extends DefinedModel }
-      ? ModelSchema<TModel, TPath>
+type RequireTopLevelRoutePath<TInstallables extends readonly SprindleInstallable[]> = {
+  readonly [K in keyof TInstallables]: TInstallables[K] extends ModelRoute<any, any, '', any, any, any> ? never : TInstallables[K]
+}
+
+type SprindleSchema<TInstallable> =
+  TInstallable extends { method: infer TMethod extends string; path: infer TPath extends string; kind: infer TKind extends string }
+    ? RouteSchema<unknown, TMethod, TKind, TPath>
+    : TInstallable extends DefinedModel
+      ? ModelSchema<TInstallable>
       : {}
 
-type ModelSchema<TModel extends DefinedModel, TPrefix extends string> =
-  TModel extends DefinedModel<infer TEntity, infer TRoutes> ? RouteTreeSchema<TEntity, TRoutes, TPrefix> : {}
+type ModelSchema<TModel extends DefinedModel> =
+  TModel extends DefinedModel<infer TPath, infer TEntity, infer TRoutes> ? RouteTreeSchema<TEntity, TRoutes, TPath> : {}
 
 type RouteTreeSchema<TEntity, TTree, TPrefix extends string> = UnionToIntersection<{
   [K in keyof TTree & string]: TTree[K] extends ModelRoute<any, infer TMethod, infer TPath, any, any, infer TKind>
@@ -72,12 +74,6 @@ type ExtractParams<TPath extends string> =
 type ParamRecord<TParam extends string> = { [K in CleanParam<TParam>]: string }
 type CleanParam<TParam extends string> = TParam extends `${infer Name}{${string}` ? Name : TParam extends `${infer Name}?` ? Name : TParam
 
-type HonoSchema<THono> = THono extends Hono<any, infer TSchema extends Schema> ? TSchema : {}
-
-type PrefixSchema<TSchema extends Schema, TPrefix extends string> = {
-  [TPath in keyof TSchema as JoinPath<TPrefix, TPath & string>]: TSchema[TPath]
-}
-
 type JoinPath<TPrefix extends string, TPath extends string> =
   TPath extends ''
     ? TPrefix
@@ -93,32 +89,21 @@ type NormalizePath<TPath extends string> = TPath extends `${infer Head}//${infer
 type MergeInput<T> = { [K in keyof T]: T[K] }
 type UnionToIntersection<T> = (T extends unknown ? (value: T) => void : never) extends (value: infer U) => void ? U : never
 
-export function installSprindle<const TApp extends Hono<any, any>, const TMounts extends readonly MountedRoute[]>(
+export function installSprindle<const TApp extends Hono<any, any>, const TInstallables extends readonly SprindleInstallable[]>(
   app: TApp,
-  mounts: TMounts,
-): TApp extends Hono<infer TEnv, infer TSchema> ? Hono<TEnv, TSchema & SprindleMountsSchema<TMounts>> : never {
-  for (const mount of mounts) {
-    if (mount.kind === 'model') {
-      app.route(mount.path, mount.model.route)
+  installables: TInstallables & RequireTopLevelRoutePath<TInstallables>,
+): TApp extends Hono<infer TEnv, infer TSchema> ? Hono<TEnv, TSchema & SprindleInstallSchema<TInstallables>> : never {
+  for (const installable of installables) {
+    if ('route' in installable) {
+      app.route(installable.path, installable.route)
       continue
     }
 
-    if (mount.kind === 'route') {
-      const boundRoute = mount.route.bind({ name: mount.path } as ModelRuntimeContext)
-      const routePath = joinPath(mount.path, boundRoute.path)
-      const install = app[boundRoute.method] as (path: string, ...handlers: unknown[]) => Hono
-      install.call(app, routePath, ...boundRoute.middleware, boundRoute.handler)
-      continue
-    }
-
-    app.route(mount.path, mount.route)
+    if (!installable.path) throw new Error('Top-level Sprindle routes need a path.')
+    const boundRoute = installable.bind({ name: installable.path } as ModelRuntimeContext)
+    const install = app[boundRoute.method] as (path: string, ...handlers: unknown[]) => Hono
+    install.call(app, boundRoute.path, ...boundRoute.middleware, boundRoute.handler)
   }
 
   return app as never
-}
-
-function joinPath(prefix: string, path: string) {
-  if (!path || path === '/') return prefix
-  if (prefix === '/') return path
-  return path.startsWith('/') ? `${prefix}${path}` : `${prefix}/${path}`
 }
