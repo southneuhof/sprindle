@@ -1,10 +1,10 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { Hono } from 'hono'
 import { z } from 'zod/v4'
-import { create, defineAction, detail, list, update } from '../../actions'
+import { create, defineRoute, detail, list, update } from '../../routes'
 import { defineModel } from '../../model'
-import { defineRoute } from '../../routes'
-import { installSprindle, type SprindleRoutesSchema } from '..'
+import { mountRoute } from '../../routes'
+import { installSprindle, type SprindleMountsSchema } from '..'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
 
 const source = {
@@ -26,14 +26,14 @@ const item = {
   },
 } satisfies ModelRuntimeEntity & { schemas: Record<'create' | 'update' | 'select', z.ZodType> }
 
-const ping = defineAction({
+const ping = defineRoute({
   method: 'get',
-  handler: (args) => args.c.json({ ok: true }),
+  action: (args) => args.c.json({ ok: true }),
 })
 
 const model = defineModel({
   entity: item,
-  actions: {
+  routes: {
     list: list(),
     detail: detail(),
     create: create(),
@@ -45,18 +45,18 @@ const model = defineModel({
 })
 
 const custom = new Hono().get('/', (c) => c.json({ ok: true }))
-const routes = [defineRoute({ path: '/items', model }), defineRoute({ path: '/health', route: custom })] as const
+const mounts = [mountRoute({ path: '/items', model }), mountRoute({ path: '/health', route: custom })] as const
 
 describe('installSprindle', () => {
   it('mounts routes at runtime', async () => {
-    const app = installSprindle(new Hono(), routes)
+    const app = installSprindle(new Hono(), mounts)
     const response = await app.request('/items/nested/ping')
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ ok: true })
   })
 
   it('infers Hono RPC schema from route definitions', () => {
-    type Schema = SprindleRoutesSchema<typeof routes>
+    type Schema = SprindleMountsSchema<typeof mounts>
 
     expectTypeOf<Schema['/items/list']['$get']['input']>().toEqualTypeOf<{ query: { page?: string; limit?: string; search?: string } }>()
     expectTypeOf<Schema['/items/detail/:id']['$get']['input']>().toEqualTypeOf<{ param: { id: string } }>()

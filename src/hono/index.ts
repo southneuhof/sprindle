@@ -1,7 +1,7 @@
 import type { Hono, Schema } from 'hono'
 import type { z } from 'zod/v4'
-import type { DefinedModel, ModelAction } from '../model'
-import type { DefinedRoute } from '../routes'
+import type { DefinedModel, ModelRoute } from '../model'
+import type { MountedRoute } from '../routes'
 
 type ListQuery = {
   page?: string
@@ -16,33 +16,33 @@ type JsonEndpoint<TInput, TStatus extends number = 200> = {
   status: TStatus
 }
 
-export type SprindleRoutesSchema<TRoutes extends readonly DefinedRoute[]> = UnionToIntersection<SprindleRouteSchema<TRoutes[number]>>
+export type SprindleMountsSchema<TMounts extends readonly MountedRoute[]> = UnionToIntersection<SprindleMountSchema<TMounts[number]>>
 
-type SprindleRouteSchema<TRoute> =
-  TRoute extends { kind: 'custom'; path: infer TPath extends string; route: infer THono extends Hono }
+type SprindleMountSchema<TMount> =
+  TMount extends { kind: 'hono'; path: infer TPath extends string; route: infer THono extends Hono }
     ? PrefixSchema<HonoSchema<THono>, TPath>
-    : TRoute extends { kind: 'model'; path: infer TPath extends string; model: infer TModel extends DefinedModel }
+    : TMount extends { kind: 'model'; path: infer TPath extends string; model: infer TModel extends DefinedModel }
       ? ModelSchema<TModel, TPath>
       : {}
 
 type ModelSchema<TModel extends DefinedModel, TPrefix extends string> =
-  TModel extends DefinedModel<infer TEntity, infer TActions> ? ActionTreeSchema<TEntity, TActions, TPrefix> : {}
+  TModel extends DefinedModel<infer TEntity, infer TRoutes> ? RouteTreeSchema<TEntity, TRoutes, TPrefix> : {}
 
-type ActionTreeSchema<TEntity, TTree, TPrefix extends string> = UnionToIntersection<{
-  [K in keyof TTree & string]: TTree[K] extends ModelAction<any, infer TMethod, infer TPath, any, any, infer TKind>
-    ? ActionSchema<TEntity, TMethod, TKind, JoinPath<JoinPath<TPrefix, K>, TPath>>
+type RouteTreeSchema<TEntity, TTree, TPrefix extends string> = UnionToIntersection<{
+  [K in keyof TTree & string]: TTree[K] extends ModelRoute<any, infer TMethod, infer TPath, any, any, infer TKind>
+    ? RouteSchema<TEntity, TMethod, TKind, JoinPath<JoinPath<TPrefix, K>, TPath>>
     : TTree[K] extends Record<string, unknown>
-      ? ActionTreeSchema<TEntity, TTree[K], JoinPath<TPrefix, K>>
+      ? RouteTreeSchema<TEntity, TTree[K], JoinPath<TPrefix, K>>
       : {}
 }[keyof TTree & string]>
 
-type ActionSchema<TEntity, TMethod extends string, TKind extends string, TPath extends string> = {
+type RouteSchema<TEntity, TMethod extends string, TKind extends string, TPath extends string> = {
   [P in NormalizePath<TPath>]: {
-    [M in `$${TMethod}`]: JsonEndpoint<ActionInput<TEntity, TKind, NormalizePath<TPath>>, ActionStatus<TKind>>
+    [M in `$${TMethod}`]: JsonEndpoint<RouteInput<TEntity, TKind, NormalizePath<TPath>>, RouteStatus<TKind>>
   }
 }
 
-type ActionInput<TEntity, TKind extends string, TPath extends string> =
+type RouteInput<TEntity, TKind extends string, TPath extends string> =
   MergeInput<KindInput<TEntity, TKind> & ParamInput<TPath>>
 
 type KindInput<TEntity, TKind extends string> =
@@ -56,7 +56,7 @@ type KindInput<TEntity, TKind extends string> =
 
 type CreateInput<TEntity> = TEntity extends { schemas: { create: infer TSchema extends z.ZodType } } ? { json: z.input<TSchema> } : { json: unknown }
 type UpdateInput<TEntity> = TEntity extends { schemas: { update: infer TSchema extends z.ZodType } } ? { json: z.input<TSchema> } : { json: unknown }
-type ActionStatus<TKind extends string> = TKind extends 'create' ? 201 : 200
+type RouteStatus<TKind extends string> = TKind extends 'create' ? 201 : 200
 
 type ParamInput<TPath extends string> = keyof ExtractParams<TPath> extends never ? {} : { param: ExtractParams<TPath> }
 type ExtractParams<TPath extends string> =
@@ -91,17 +91,17 @@ type NormalizePath<TPath extends string> = TPath extends `${infer Head}//${infer
 type MergeInput<T> = { [K in keyof T]: T[K] }
 type UnionToIntersection<T> = (T extends unknown ? (value: T) => void : never) extends (value: infer U) => void ? U : never
 
-export function installSprindle<const TApp extends Hono<any, any>, const TRoutes extends readonly DefinedRoute[]>(
+export function installSprindle<const TApp extends Hono<any, any>, const TMounts extends readonly MountedRoute[]>(
   app: TApp,
-  routes: TRoutes,
-): TApp extends Hono<infer TEnv, infer TSchema> ? Hono<TEnv, TSchema & SprindleRoutesSchema<TRoutes>> : never {
-  for (const route of routes) {
-    if (route.kind === 'model') {
-      app.route(route.path, route.model.route)
+  mounts: TMounts,
+): TApp extends Hono<infer TEnv, infer TSchema> ? Hono<TEnv, TSchema & SprindleMountsSchema<TMounts>> : never {
+  for (const mount of mounts) {
+    if (mount.kind === 'model') {
+      app.route(mount.path, mount.model.route)
       continue
     }
 
-    app.route(route.path, route.route)
+    app.route(mount.path, mount.route)
   }
 
   return app as never

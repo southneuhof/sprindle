@@ -1,41 +1,41 @@
 import { Hono } from 'hono'
-import { compileActionTree, type ActionTree } from './action-tree'
-import type { ActionHandlerArgs, ActionPipeline } from './action-types'
+import { compileRouteTree, type RouteTree } from './route-tree'
+import type { RouteHandlerArgs, RoutePipeline } from './route-types'
 import type { ModelRuntimeContext, ModelRuntimeEntity } from '../source'
-import { normalizePipeline } from '../actions/pipeline'
+import { normalizePipeline } from '../routes/pipeline'
 
 export type DefineModelConfig<
   TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
-  TActions extends ActionTree = ActionTree,
+  TRoutes extends RouteTree = RouteTree,
 > = {
   entity: TEntity
-  actions: TActions
-} & ActionPipeline<ActionHandlerArgs<ModelRuntimeContext>>
+  routes: TRoutes
+} & RoutePipeline<RouteHandlerArgs<ModelRuntimeContext>>
 
 export type DefinedModel<
   TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
-  TActions extends ActionTree = ActionTree,
+  TRoutes extends RouteTree = RouteTree,
 > = {
   name: string
   route: Hono
-  actions: TActions
+  routes: TRoutes
   context: ModelRuntimeContext
 }
 
 export function defineModel<
   const TEntity extends ModelRuntimeEntity = ModelRuntimeEntity,
-  const TActions extends ActionTree = ActionTree,
+  const TRoutes extends RouteTree = RouteTree,
 >({
   entity,
-  actions,
+  routes,
   before,
   authorize,
   validate,
   after,
   error,
-}: DefineModelConfig<TEntity, TActions>): DefinedModel<TEntity, TActions> {
+}: DefineModelConfig<TEntity, TRoutes>): DefinedModel<TEntity, TRoutes> {
   const route = new Hono()
   const context = { name: entity.name, entity, pipeline: normalizePipeline({ before, authorize, validate, after, error }) } as ModelRuntimeContext
-  compileActionTree({ app: route, context, tree: actions as ActionTree })
-  return { name: entity.name, route, actions, context }
+  compileRouteTree({ app: route, context, tree: routes as RouteTree })
+  return { name: entity.name, route, routes, context }
 }

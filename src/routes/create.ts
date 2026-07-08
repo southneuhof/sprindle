@@ -1,12 +1,12 @@
-import { defineAction } from './define-action'
+import { defineRoute } from './define-route'
 
 type CreateState = { input: unknown }
 
-export const create = defineAction({
+export const create = defineRoute({
   method: 'post',
   kind: 'create',
   state: async ({ c }) => ({ input: await c.req.json() }),
-  handler: async ({ c, context, state }) => {
+  action: async ({ c, context, state }) => {
     try {
       const data = await context.entity.source.create({ input: state.input, context })
       return c.json({ data }, 201)

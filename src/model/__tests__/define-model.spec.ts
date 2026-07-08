@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
-import { create, defineAction, list } from '../../actions'
+import { create, defineRoute, list } from '../../routes'
 import { defineModel } from '../define-model'
 import { createDrizzleModel } from '../../source'
 import { getPrimaryKeyColumns } from '../../source/drizzle-source'
-import type { ActionTree } from '../action-tree'
+import type { RouteTree } from '../route-tree'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
 
 const source: ModelSource<{ id: string }> = {
@@ -32,20 +32,20 @@ const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 
 describe('defineModel route compiler', () => {
   if (false) {
-    const uncalledAction = defineAction({
+    const uncalledRoute = defineRoute({
       method: 'get',
-      handler: ({ c }) => c.json({ ok: true }),
+      action: ({ c }) => c.json({ ok: true }),
     })
 
-    // @ts-expect-error action factories must be called before registration
-    const tree: ActionTree = { uncalledAction }
+    // @ts-expect-error route factories must be called before registration
+    const tree: RouteTree = { uncalledRoute }
     void tree
   }
 
-  it('compiles action tree keys into route segments', async () => {
+  it('compiles route tree keys into route segments', async () => {
     const model = defineModel({
       entity: itemEntity,
-      actions: {
+      routes: {
         list: list(),
         nested: {
           version1: list(),
@@ -62,7 +62,7 @@ describe('defineModel route compiler', () => {
     expect((await app.request('/nested/test/versionTest')).status).toBe(200)
   })
 
-  it('runs model and action phases in declaration order', async () => {
+  it('runs model and route phases in declaration order', async () => {
     const order: string[] = []
     const model = defineModel({
       entity: itemEntity,
@@ -70,20 +70,20 @@ describe('defineModel route compiler', () => {
       authorize: [() => void order.push('model.authorize')],
       validate: [() => void order.push('model.validate')],
       after: [() => void order.push('model.after')],
-      actions: {
-        ping: defineAction({
+      routes: {
+        ping: defineRoute({
           method: 'get',
           before: [
             ({ state }) => {
-              order.push('action.before')
+              order.push('route.before')
               return { value: `${state.value}-patched` }
             },
           ],
-          authorize: [() => void order.push('action.authorize')],
-          validate: [() => void order.push('action.validate')],
-          after: [() => void order.push('action.after')],
+          authorize: [() => void order.push('route.authorize')],
+          validate: [() => void order.push('route.validate')],
+          after: [() => void order.push('route.after')],
           state: () => ({ value: 'state' }),
-          handler: ({ c, state }) => {
+          action: ({ c, state }) => {
             order.push(`handler.${state.value}`)
             return c.json({ ok: true })
           },
@@ -95,33 +95,33 @@ describe('defineModel route compiler', () => {
     expect((await app.request('/ping')).status).toBe(200)
     expect(order).toEqual([
       'model.before',
-      'action.before',
+      'route.before',
       'model.authorize',
-      'action.authorize',
+      'route.authorize',
       'model.validate',
-      'action.validate',
+      'route.validate',
       'handler.state-patched',
-      'action.after',
+      'route.after',
       'model.after',
     ])
   })
 
-  it('keeps action phases local to their action', async () => {
+  it('keeps route phases local to their route', async () => {
     const order: string[] = []
     const model = defineModel({
       entity: itemEntity,
-      before: [({ action }) => void order.push(`model.${action.kind}`)],
-      actions: {
-        first: defineAction({
+      before: [({ route }) => void order.push(`model.${route.kind}`)],
+      routes: {
+        first: defineRoute({
           method: 'get',
           kind: 'custom',
           before: [() => void order.push('first.before')],
-          handler: ({ c }) => c.json({ ok: true }),
+          action: ({ c }) => c.json({ ok: true }),
         })(),
-        second: defineAction({
+        second: defineRoute({
           method: 'get',
           kind: 'custom',
-          handler: ({ c }) => c.json({ ok: true }),
+          action: ({ c }) => c.json({ ok: true }),
         })(),
       },
     })
@@ -136,8 +136,8 @@ describe('defineModel route compiler', () => {
     const order: string[] = []
     const model = defineModel({
       entity: itemEntity,
-      actions: {
-        locked: defineAction({
+      routes: {
+        locked: defineRoute({
           method: 'get',
           authorize: [
             () => {
@@ -147,7 +147,7 @@ describe('defineModel route compiler', () => {
           ],
           validate: [() => void order.push('validate')],
           after: [() => void order.push('after')],
-          handler: ({ c }) => {
+          action: ({ c }) => {
             order.push('handler')
             return c.json({ ok: true })
           },
@@ -165,11 +165,11 @@ describe('defineModel route compiler', () => {
   it('returns validation errors as bad requests', async () => {
     const model = defineModel({
       entity: itemEntity,
-      actions: {
-        invalid: defineAction({
+      routes: {
+        invalid: defineRoute({
           method: 'get',
           validate: [() => ({ field: 'name', message: 'Name is required.' })],
-          handler: ({ c }) => c.json({ ok: true }),
+          action: ({ c }) => c.json({ ok: true }),
         })(),
       },
     })
@@ -180,21 +180,21 @@ describe('defineModel route compiler', () => {
     expect(await response.json()).toEqual({ error: 'validation_error', issues: [{ field: 'name', message: 'Name is required.' }] })
   })
 
-  it('maps thrown errors through action and model error phases', async () => {
+  it('maps thrown errors through route and model error phases', async () => {
     const model = defineModel({
       entity: itemEntity,
       error: [({ c }) => c.json({ error: 'model' }, 500)],
-      actions: {
-        fails: defineAction({
+      routes: {
+        fails: defineRoute({
           method: 'get',
           error: [({ c, error }) => (error instanceof Error && error.message === 'known' ? c.json({ error: 'known' }, 409) : undefined)],
-          handler: () => {
+          action: () => {
             throw new Error('known')
           },
         })(),
-        fallsBack: defineAction({
+        fallsBack: defineRoute({
           method: 'get',
-          handler: () => {
+          action: () => {
             throw new Error('unknown')
           },
         })(),
@@ -202,19 +202,19 @@ describe('defineModel route compiler', () => {
     })
     const app = new Hono().route('/', model.route)
 
-    const actionMapped = await app.request('/fails')
-    expect(actionMapped.status).toBe(409)
-    expect(await actionMapped.json()).toEqual({ error: 'known' })
+    const routeMapped = await app.request('/fails')
+    expect(routeMapped.status).toBe(409)
+    expect(await routeMapped.json()).toEqual({ error: 'known' })
 
     const modelMapped = await app.request('/fallsBack')
     expect(modelMapped.status).toBe(500)
     expect(await modelMapped.json()).toEqual({ error: 'model' })
   })
 
-  it('accepts declarative hooks on first-class action factories', async () => {
+  it('accepts declarative hooks on first-class route factories', async () => {
     const model = defineModel({
       entity: itemEntity,
-      actions: {
+      routes: {
         create: create({
           validate: [({ state }) => (state.input && typeof state.input === 'object' && 'id' in state.input ? undefined : 'id required')],
         }),
@@ -230,16 +230,16 @@ describe('defineModel route compiler', () => {
     expect(await valid.json()).toEqual({ data: { id: 'item-1' } })
   })
 
-  it('accepts forwarded hooks on custom action factories', async () => {
-    const custom = defineAction({
+  it('accepts forwarded hooks on custom route factories', async () => {
+    const custom = defineRoute({
       method: 'get',
       before: [({ state }) => ({ value: `${state.value}-base` })],
       state: () => ({ value: 'state' }),
-      handler: ({ c, state }) => c.json({ value: state.value }),
+      action: ({ c, state }) => c.json({ value: state.value }),
     })
     const model = defineModel({
       entity: itemEntity,
-      actions: {
+      routes: {
         custom: custom({
           before: [({ state }) => ({ value: `${state.value}-call` })],
           validate: [({ state }) => (state.value === 'state-base-call' ? undefined : 'wrong order')],

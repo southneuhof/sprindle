@@ -1,51 +1,117 @@
-import type { Hono } from 'hono'
-import type { Schema } from 'hono'
-import type { DefinedModel } from '../model'
+import type { Context, MiddlewareHandler } from 'hono'
+import type { ModelRuntimeContext } from '../source'
+import type { AnyInput, HttpMethod, ModelRoute, ModelRouteKind, RouteHandlerArgs, RoutePipeline } from '../model/route-types'
+import { MODEL_ROUTE } from '../model/route-types'
+import { normalizePipeline, runRoutePipeline, type PipelineContext } from './pipeline'
 
-export type ModelRoute<TPath extends string = string, TModel extends DefinedModel = DefinedModel> = {
-  kind: 'model'
-  path: TPath
-  model: TModel
+export type DefineRouteConfig<
+  TContext extends ModelRuntimeContext,
+  TMethod extends HttpMethod,
+  TPath extends string,
+  TKind extends ModelRouteKind,
+  TState extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  method: TMethod
+  path?: TPath
+  kind?: TKind
+  middleware?: MiddlewareHandler[]
+  state?: (args: { c: Context; context: TContext }) => TState | Promise<TState>
+  action: (args: RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>) => Response | Promise<Response>
+} & RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>>
+
+export type RouteConfigFor<
+  TState extends Record<string, unknown>,
+  TContext extends ModelRuntimeContext = ModelRuntimeContext,
+  TMethod extends HttpMethod = HttpMethod,
+  TPath extends string = string,
+  TKind extends ModelRouteKind = ModelRouteKind,
+> = RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>>
+
+export type RouteFactoryConfigFor<TState extends Record<string, unknown>> = RouteConfigFor<TState>
+
+export type ModelRouteFactory<
+  TContext extends ModelRuntimeContext = ModelRuntimeContext,
+  TMethod extends HttpMethod = HttpMethod,
+  TPath extends string = string,
+  TInput extends AnyInput = AnyInput,
+  TOutput = unknown,
+  TKind extends ModelRouteKind = ModelRouteKind,
+  TState extends Record<string, unknown> = Record<string, unknown>,
+> = (config?: RouteConfigFor<TState, TContext, TMethod, TPath, TKind>) => ModelRoute<TContext, TMethod, TPath, TInput, TOutput, TKind>
+
+export function defineRoute<
+  TContext extends ModelRuntimeContext = ModelRuntimeContext,
+  const TMethod extends HttpMethod = HttpMethod,
+  const TPath extends string = '',
+  TInput extends AnyInput = {},
+  TOutput = unknown,
+  const TKind extends ModelRouteKind = 'custom',
+  TState extends Record<string, unknown> = Record<string, unknown>,
+>({
+  method,
+  path,
+  kind,
+  middleware = [],
+  before,
+  authorize,
+  validate,
+  after,
+  error,
+  state,
+  action,
+}: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState>): ModelRouteFactory<TContext, TMethod, TPath, TInput, TOutput, TKind, TState> {
+  const routePath = (path ?? '') as TPath
+  const routeKind = (kind ?? 'custom') as TKind
+  const route = { method, path: routePath, kind: routeKind }
+  const basePipeline = { before, authorize, validate, after, error }
+  return (config = {}) => {
+    const routePipeline = normalizePipeline(mergePipeline(basePipeline, config))
+    return {
+      [MODEL_ROUTE]: true,
+      method,
+      path: routePath,
+      kind: routeKind,
+      bind: (context) => ({
+        method,
+        path: routePath,
+        middleware,
+        handler: async (c) => {
+          const typedContext = context as TContext
+          const args = {
+            c,
+            context: typedContext,
+            route,
+            state: state ? await state({ c, context: typedContext }) : ({} as TState),
+          } as RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>
+
+          return runRoutePipeline(
+            args,
+            normalizePipeline((context as PipelineContext).pipeline) as RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>> | undefined,
+            routePipeline as RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>> | undefined,
+            action,
+          )
+        },
+      }),
+    }
+  }
 }
 
-export type CustomRoute<TPath extends string = string, TRoute extends Hono = Hono> = {
-  kind: 'custom'
-  path: TPath
-  route: TRoute
+function mergePipeline<TArgs extends RouteHandlerArgs>(base: RoutePipeline<TArgs>, config: RoutePipeline<TArgs>) {
+  return {
+    before: mergeHooks(base.before, config.before),
+    authorize: mergeHooks(base.authorize, config.authorize),
+    validate: mergeHooks(base.validate, config.validate),
+    after: mergeHooks(base.after, config.after),
+    error: mergeHooks(base.error, config.error),
+  }
 }
 
-export type DefinedRoute = ModelRoute<string, DefinedModel> | CustomRoute
-
-export function defineRoute<const TPath extends string, const TModel extends DefinedModel>(config: { path: TPath; model: TModel; route?: never }): ModelRoute<TPath, TModel>
-export function defineRoute<const TPath extends string, const TRoute extends Hono>(config: { path: TPath; route: TRoute; model?: never }): CustomRoute<TPath, TRoute>
-export function defineRoute(config: { path: string; model?: DefinedModel; route?: Hono }): DefinedRoute {
-  if (config.model) return { kind: 'model', path: config.path, model: config.model }
-  if (config.route) return { kind: 'custom', path: config.path, route: config.route }
-  throw new Error('defineRoute() needs a model or route.')
+function mergeHooks<T>(base: T | T[] | undefined, extra: T | T[] | undefined) {
+  if (!base) return extra
+  if (!extra) return base
+  return [...list(base), ...list(extra)]
 }
 
-export type CustomRoutesSchema<TRoutes extends readonly DefinedRoute[]> = UnionToIntersection<CustomRouteSchema<TRoutes[number]>>
-
-type CustomRouteSchema<TRoute> =
-  TRoute extends { kind: 'custom'; path: infer TPath extends string; route: infer THono extends Hono }
-    ? PrefixSchema<HonoSchema<THono>, TPath>
-    : {}
-
-type HonoSchema<THono> = THono extends Hono<any, infer TSchema extends Schema> ? TSchema : {}
-
-type PrefixSchema<TSchema extends Schema, TPrefix extends string> = {
-  [TPath in keyof TSchema as JoinPath<TPrefix, TPath & string>]: TSchema[TPath]
+function list<T>(value: T | T[]) {
+  return Array.isArray(value) ? value : [value]
 }
-
-type JoinPath<TPrefix extends string, TPath extends string> =
-  TPath extends ''
-    ? TPrefix
-    : TPath extends '/'
-      ? TPrefix
-      : TPrefix extends '/'
-        ? TPath
-        : TPath extends `/${infer TRest}`
-          ? `${TPrefix}/${TRest}`
-          : `${TPrefix}/${TPath}`
-
-type UnionToIntersection<T> = (T extends unknown ? (value: T) => void : never) extends (value: infer U) => void ? U : never

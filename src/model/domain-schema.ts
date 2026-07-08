@@ -332,7 +332,7 @@ function getZodDef(schema: unknown): Record<string, unknown> | undefined {
 
 function unboundSource(): ModelSource {
   const fail = async () => {
-    throw new Error('Domain database is not bound. Call bindDomainDatabase() before model actions run.')
+    throw new Error('Domain database is not bound. Call bindDomainDatabase() before model routes run.')
   }
   return { list: fail, detail: fail, create: fail, update: fail, delete: fail, materialize: fail }
 }
