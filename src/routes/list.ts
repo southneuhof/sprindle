@@ -1,10 +1,10 @@
 import { zValidator } from '@hono/zod-validator'
-import { defineRoute } from './define-route'
+import { defineRouteFactory } from './define-route'
 import { listQuerySchema } from '../validation'
 
 type ListState = { query: Record<string, unknown> }
 
-export const list = defineRoute({
+export const list = defineRouteFactory({
   method: 'get',
   kind: 'list',
   middleware: [zValidator('query', listQuerySchema)],

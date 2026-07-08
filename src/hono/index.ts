@@ -1,6 +1,6 @@
 import type { Hono, Schema } from 'hono'
 import type { z } from 'zod/v4'
-import type { DefinedModel, ModelRoute } from '../model'
+import type { DefinedModel, ModelRoute, ModelRuntimeContext } from '../model'
 import type { MountedRoute } from '../routes'
 
 type ListQuery = {
@@ -21,6 +21,8 @@ export type SprindleMountsSchema<TMounts extends readonly MountedRoute[]> = Unio
 type SprindleMountSchema<TMount> =
   TMount extends { kind: 'hono'; path: infer TPath extends string; route: infer THono extends Hono }
     ? PrefixSchema<HonoSchema<THono>, TPath>
+    : TMount extends { kind: 'route'; path: infer TPath extends string; route: { method: infer TMethod extends string; path: infer TRoutePath extends string; kind: infer TKind extends string } }
+      ? RouteSchema<unknown, TMethod, TKind, JoinPath<TPath, TRoutePath>>
     : TMount extends { kind: 'model'; path: infer TPath extends string; model: infer TModel extends DefinedModel }
       ? ModelSchema<TModel, TPath>
       : {}
@@ -101,8 +103,22 @@ export function installSprindle<const TApp extends Hono<any, any>, const TMounts
       continue
     }
 
+    if (mount.kind === 'route') {
+      const boundRoute = mount.route.bind({ name: mount.path } as ModelRuntimeContext)
+      const routePath = joinPath(mount.path, boundRoute.path)
+      const install = app[boundRoute.method] as (path: string, ...handlers: unknown[]) => Hono
+      install.call(app, routePath, ...boundRoute.middleware, boundRoute.handler)
+      continue
+    }
+
     app.route(mount.path, mount.route)
   }
 
   return app as never
+}
+
+function joinPath(prefix: string, path: string) {
+  if (!path || path === '/') return prefix
+  if (prefix === '/') return path
+  return path.startsWith('/') ? `${prefix}${path}` : `${prefix}/${path}`
 }

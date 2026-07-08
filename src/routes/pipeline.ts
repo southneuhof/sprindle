@@ -1,4 +1,5 @@
 import type { RouteHandlerArgs, RoutePipeline, ValidationIssue } from '../model/route-types'
+import type { RouteActionResult } from './define-route'
 
 export type PipelineContext = {
   pipeline?: RoutePipeline<RouteHandlerArgs>
@@ -8,7 +9,7 @@ export async function runRoutePipeline<TArgs extends RouteHandlerArgs>(
   args: TArgs,
   modelPipeline: RoutePipeline<TArgs> | undefined,
   routePipeline: RoutePipeline<TArgs> | undefined,
-  action: (args: TArgs) => Response | Promise<Response>,
+  action: (args: TArgs) => RouteActionResult | Promise<RouteActionResult>,
 ) {
   try {
     await runBefore(args, modelPipeline)
@@ -20,7 +21,7 @@ export async function runRoutePipeline<TArgs extends RouteHandlerArgs>(
     const validationResponse = (await runValidate(args, modelPipeline)) ?? (await runValidate(args, routePipeline))
     if (validationResponse) return validationResponse
 
-    let response = await action(args)
+    let response = toResponse(args, await action(args))
     response = (await runAfter(args, response, routePipeline)) ?? response
     response = (await runAfter(args, response, modelPipeline)) ?? response
     return response
@@ -29,6 +30,10 @@ export async function runRoutePipeline<TArgs extends RouteHandlerArgs>(
     if (response) return response
     throw error
   }
+}
+
+function toResponse<TArgs extends RouteHandlerArgs>(args: TArgs, result: RouteActionResult) {
+  return result instanceof Response ? result : args.c.json(result)
 }
 
 export function normalizePipeline<TArgs extends RouteHandlerArgs>(pipeline: RoutePipeline<TArgs> | undefined) {

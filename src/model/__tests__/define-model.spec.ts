@@ -32,10 +32,7 @@ const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 
 describe('defineModel route compiler', () => {
   if (false) {
-    const uncalledRoute = defineRoute({
-      method: 'get',
-      action: ({ c }) => c.json({ ok: true }),
-    })
+    const uncalledRoute = list
 
     // @ts-expect-error route factories must be called before registration
     const tree: RouteTree = { uncalledRoute }
@@ -87,7 +84,7 @@ describe('defineModel route compiler', () => {
             order.push(`handler.${state.value}`)
             return c.json({ ok: true })
           },
-        })(),
+        }),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -117,12 +114,12 @@ describe('defineModel route compiler', () => {
           kind: 'custom',
           before: [() => void order.push('first.before')],
           action: ({ c }) => c.json({ ok: true }),
-        })(),
+        }),
         second: defineRoute({
           method: 'get',
           kind: 'custom',
           action: ({ c }) => c.json({ ok: true }),
-        })(),
+        }),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -151,7 +148,7 @@ describe('defineModel route compiler', () => {
             order.push('handler')
             return c.json({ ok: true })
           },
-        })(),
+        }),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -170,7 +167,7 @@ describe('defineModel route compiler', () => {
           method: 'get',
           validate: [() => ({ field: 'name', message: 'Name is required.' })],
           action: ({ c }) => c.json({ ok: true }),
-        })(),
+        }),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -191,13 +188,13 @@ describe('defineModel route compiler', () => {
           action: () => {
             throw new Error('known')
           },
-        })(),
+        }),
         fallsBack: defineRoute({
           method: 'get',
           action: () => {
             throw new Error('unknown')
           },
-        })(),
+        }),
       },
     })
     const app = new Hono().route('/', model.route)
@@ -230,19 +227,16 @@ describe('defineModel route compiler', () => {
     expect(await valid.json()).toEqual({ data: { id: 'item-1' } })
   })
 
-  it('accepts forwarded hooks on custom route factories', async () => {
-    const custom = defineRoute({
-      method: 'get',
-      before: [({ state }) => ({ value: `${state.value}-base` })],
-      state: () => ({ value: 'state' }),
-      action: ({ c, state }) => c.json({ value: state.value }),
-    })
+  it('accepts direct custom routes', async () => {
     const model = defineModel({
       entity: itemEntity,
       routes: {
-        custom: custom({
-          before: [({ state }) => ({ value: `${state.value}-call` })],
-          validate: [({ state }) => (state.value === 'state-base-call' ? undefined : 'wrong order')],
+        custom: defineRoute({
+          method: 'get',
+          before: [({ state }) => ({ value: `${state.value}-base` })],
+          validate: [({ state }) => (state.value === 'state-base' ? undefined : 'wrong order')],
+          state: () => ({ value: 'state' }),
+          action: ({ state }) => ({ value: state.value }),
         }),
       },
     })
@@ -250,7 +244,7 @@ describe('defineModel route compiler', () => {
     const response = await app.request('/custom')
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ value: 'state-base-call' })
+    expect(await response.json()).toEqual({ value: 'state-base' })
   })
 
   it('uses the drizzle table name as the model name', () => {

@@ -1,8 +1,8 @@
-import { defineRoute } from './define-route'
+import { defineRouteFactory } from './define-route'
 
 type CreateState = { input: unknown }
 
-export const create = defineRoute({
+export const create = defineRouteFactory({
   method: 'post',
   kind: 'create',
   state: async ({ c }) => ({ input: await c.req.json() }),

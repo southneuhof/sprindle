@@ -1,10 +1,10 @@
 import { zValidator } from '@hono/zod-validator'
-import { defineRoute } from './define-route'
+import { defineRouteFactory } from './define-route'
 import { idParamSchema } from '../validation'
 
 type DeleteState = { id: string }
 
-export const deleteRoute = defineRoute({
+export const deleteRoute = defineRouteFactory({
   method: 'delete',
   path: '/:id',
   kind: 'delete',
