@@ -72,8 +72,12 @@ describe('installSprindle', () => {
     expectTypeOf<Schema['/items/detail/:id']['$get']['input']>().toEqualTypeOf<{ param: { id: string } }>()
     expectTypeOf<Schema['/items/create']['$post']['input']>().toEqualTypeOf<{ json: z.input<typeof item.schemas.create> }>()
     expectTypeOf<Schema['/items/update/:id']['$patch']['input']>().toEqualTypeOf<{ json: z.input<typeof item.schemas.update>; param: { id: string } }>()
-    expectTypeOf<Schema['/items/nested/ping']['$get']['status']>().toEqualTypeOf<200>()
-    expectTypeOf<Schema['/items/create']['$post']['status']>().toEqualTypeOf<201>()
+    expectTypeOf<Schema['/items/nested/ping']['$get']['status']>().toMatchTypeOf<number>()
+    expectTypeOf<Schema['/items/create']['$post']['status']>().toEqualTypeOf<201 | 400 | 401 | 403 | 409 | 422 | 500>()
+    type ListSuccess = Extract<Schema['/items/list']['$get'], { status: 200 }>['output']
+    type DetailSuccess = Extract<Schema['/items/detail/:id']['$get'], { status: 200 }>['output']
+    expectTypeOf<ListSuccess>().toEqualTypeOf<{ data: z.output<typeof item.schemas.select>[]; page: number; limit: number; total?: number }>()
+    expectTypeOf<DetailSuccess>().toEqualTypeOf<{ data: z.output<typeof item.schemas.select> }>()
     expectTypeOf<Schema['/health']['$get']['status']>().toEqualTypeOf<200>()
   })
 })

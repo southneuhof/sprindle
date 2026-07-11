@@ -12,13 +12,14 @@ export type DefineRouteConfig<
   TPath extends string,
   TKind extends ModelRouteKind,
   TState extends Record<string, unknown> = Record<string, unknown>,
+  TOutput = RouteActionResult,
 > = {
   method: TMethod
   path?: TPath
   kind?: TKind
   middleware?: MiddlewareHandler[]
   state?: (args: { c: Context; context: TContext }) => TState | Promise<TState>
-  action: (args: RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>) => RouteActionResult | Promise<RouteActionResult>
+  action: (args: RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>) => TOutput | Promise<TOutput>
 } & RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>>
 
 export type RouteConfigFor<
@@ -42,28 +43,28 @@ export type ModelRouteFactory<
 > = (config?: RouteConfigFor<TState, TContext, TMethod, TPath, TKind>) => ModelRoute<TContext, TMethod, TPath, TInput, TOutput, TKind>
 
 export function defineRoute<
+  TOutput,
   TContext extends ModelRuntimeContext = ModelRuntimeContext,
   const TMethod extends HttpMethod = HttpMethod,
   TInput extends AnyInput = {},
-  TOutput = unknown,
   const TKind extends ModelRouteKind = 'custom',
   TState extends Record<string, unknown> = Record<string, unknown>,
->(config: Omit<DefineRouteConfig<TContext, TMethod, '', TKind, TState>, 'path'> & { path?: never }): ModelRoute<TContext, TMethod, '', TInput, TOutput, TKind>
+>(config: Omit<DefineRouteConfig<TContext, TMethod, '', TKind, TState, TOutput>, 'path'> & { path?: never }): ModelRoute<TContext, TMethod, '', TInput, Awaited<TOutput>, TKind>
 export function defineRoute<
+  TOutput,
   TContext extends ModelRuntimeContext = ModelRuntimeContext,
   const TMethod extends HttpMethod = HttpMethod,
   const TPath extends string = string,
   TInput extends AnyInput = {},
-  TOutput = unknown,
   const TKind extends ModelRouteKind = 'custom',
   TState extends Record<string, unknown> = Record<string, unknown>,
->(config: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState> & { path: TPath }): ModelRoute<TContext, TMethod, TPath, TInput, TOutput, TKind>
+>(config: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState, TOutput> & { path: TPath }): ModelRoute<TContext, TMethod, TPath, TInput, Awaited<TOutput>, TKind>
 export function defineRoute<
   TContext extends ModelRuntimeContext = ModelRuntimeContext,
   const TMethod extends HttpMethod = HttpMethod,
   const TPath extends string = '',
   TInput extends AnyInput = {},
-  TOutput = unknown,
+  TOutput = RouteActionResult,
   const TKind extends ModelRouteKind = 'custom',
   TState extends Record<string, unknown> = Record<string, unknown>,
 >({
@@ -78,7 +79,7 @@ export function defineRoute<
   error,
   state,
   action,
-}: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState>): ModelRoute<TContext, TMethod, TPath, TInput, TOutput, TKind> {
+}: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState, TOutput>): ModelRoute<TContext, TMethod, TPath, TInput, TOutput, TKind> {
   const routePath = (path ?? '') as TPath
   const routeKind = (kind ?? 'custom') as TKind
   const route = { method, path: routePath, kind: routeKind }
@@ -105,7 +106,7 @@ export function defineRoute<
           args,
           normalizePipeline((context as PipelineContext).pipeline) as RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>> | undefined,
           routePipeline as RoutePipeline<RouteHandlerArgs<TContext, TState, TMethod, TPath, TKind>> | undefined,
-          action,
+          action as never,
         )
       },
     }),
@@ -117,10 +118,10 @@ export function defineRouteFactory<
   const TMethod extends HttpMethod = HttpMethod,
   const TPath extends string = '',
   TInput extends AnyInput = {},
-  TOutput = unknown,
+  TOutput = RouteActionResult,
   const TKind extends ModelRouteKind = 'custom',
   TState extends Record<string, unknown> = Record<string, unknown>,
->(config: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState>): ModelRouteFactory<TContext, TMethod, TPath, TInput, TOutput, TKind, TState> {
+>(config: DefineRouteConfig<TContext, TMethod, TPath, TKind, TState, TOutput>): ModelRouteFactory<TContext, TMethod, TPath, TInput, TOutput, TKind, TState> {
   return (extra = {}) => defineRoute({ ...config, ...mergePipeline(config, extra) } as never) as ModelRoute<TContext, TMethod, TPath, TInput, TOutput, TKind>
 }
 

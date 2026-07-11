@@ -1,4 +1,4 @@
-import type { Hono } from 'hono'
+import type { Hono, TypedResponse } from 'hono'
 import type { z } from 'zod/v4'
 import type { DefinedModel, ModelRoute, ModelRuntimeContext } from '../model'
 
@@ -8,9 +8,9 @@ type ListQuery = {
   search?: string
 }
 
-type JsonEndpoint<TInput, TStatus extends number = 200> = {
+type JsonEndpoint<TInput, TOutput, TStatus extends number = 200> = {
   input: TInput
-  output: unknown
+  output: TOutput
   outputFormat: 'json'
   status: TStatus
 }
@@ -33,18 +33,32 @@ type ModelSchema<TModel extends DefinedModel> =
   TModel extends DefinedModel<infer TPath, infer TEntity, infer TRoutes> ? RouteTreeSchema<TEntity, TRoutes, TPath> : {}
 
 type RouteTreeSchema<TEntity, TTree, TPrefix extends string> = UnionToIntersection<{
-  [K in keyof TTree & string]: TTree[K] extends ModelRoute<any, infer TMethod, infer TPath, any, any, infer TKind>
-    ? RouteSchema<TEntity, TMethod, TKind, JoinPath<JoinPath<TPrefix, K>, TPath>>
+  [K in keyof TTree & string]: TTree[K] extends ModelRoute<any, infer TMethod, infer TPath, any, infer TOutput, infer TKind>
+    ? RouteSchema<TEntity, TMethod, TKind, JoinPath<JoinPath<TPrefix, K>, TPath>, TOutput>
     : TTree[K] extends Record<string, unknown>
       ? RouteTreeSchema<TEntity, TTree[K], JoinPath<TPrefix, K>>
       : {}
 }[keyof TTree & string]>
 
-type RouteSchema<TEntity, TMethod extends string, TKind extends string, TPath extends string> = {
+type RouteSchema<TEntity, TMethod extends string, TKind extends string, TPath extends string, TOutput = unknown> = {
   [P in NormalizePath<TPath>]: {
-    [M in `$${TMethod}`]: JsonEndpoint<RouteInput<TEntity, TKind, NormalizePath<TPath>>, RouteStatus<TKind>>
+    [M in `$${TMethod}`]: TKind extends 'custom'
+      ? OutputEndpoint<RouteInput<TEntity, TKind, NormalizePath<TPath>>, TOutput>
+      : CanonicalEndpoint<TEntity, RouteInput<TEntity, TKind, NormalizePath<TPath>>, TKind>
   }
 }
+
+type CanonicalEndpoint<TEntity, TInput, TKind extends string> =
+  | JsonEndpoint<TInput, KindOutput<TEntity, TKind>, RouteStatus<TKind>>
+  | JsonEndpoint<TInput, RpcError, ErrorStatus<TKind>>
+
+type OutputEndpoint<TInput, TOutput> = Awaited<TOutput> extends infer TResult
+  ? TResult extends TypedResponse<infer TData, infer TStatus, infer TFormat>
+    ? { input: TInput; output: TData; outputFormat: TFormat; status: TStatus }
+    : TResult extends object
+      ? JsonEndpoint<TInput, TResult, 200>
+      : JsonEndpoint<TInput, unknown, 200>
+  : never
 
 type RouteInput<TEntity, TKind extends string, TPath extends string> =
   MergeInput<KindInput<TEntity, TKind> & ParamInput<TPath>>
@@ -60,7 +74,17 @@ type KindInput<TEntity, TKind extends string> =
 
 type CreateInput<TEntity> = TEntity extends { schemas: { create: infer TSchema extends z.ZodType } } ? { json: z.input<TSchema> } : { json: unknown }
 type UpdateInput<TEntity> = TEntity extends { schemas: { update: infer TSchema extends z.ZodType } } ? { json: z.input<TSchema> } : { json: unknown }
+type SelectOutput<TEntity> = TEntity extends { schemas: { select: infer TSchema extends z.ZodType } } ? z.output<TSchema> : unknown
+type KindOutput<TEntity, TKind extends string> = TKind extends 'list'
+  ? { data: SelectOutput<TEntity>[]; page: number; limit: number; total?: number }
+  : TKind extends 'detail' | 'create' | 'update'
+    ? { data: SelectOutput<TEntity> }
+    : TKind extends 'delete'
+      ? { ok: true }
+      : unknown
+type RpcError = { error: string; message?: string; issues?: Array<{ field?: string; message: string }> }
 type RouteStatus<TKind extends string> = TKind extends 'create' ? 201 : 200
+type ErrorStatus<TKind extends string> = TKind extends 'list' ? 400 | 401 | 403 | 500 : TKind extends 'create' ? 400 | 401 | 403 | 409 | 422 | 500 : 400 | 401 | 403 | 404 | 409 | 422 | 500
 
 type ParamInput<TPath extends string> = keyof ExtractParams<TPath> extends never ? {} : { param: ExtractParams<TPath> }
 type ExtractParams<TPath extends string> =
