@@ -1,0 +1,38 @@
+{
+  "name": "@southneuhof/sprindle",
+  "private": false,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Backend framework primitives for South Neuhof information systems.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/southneuhof/sprindle.git"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./hono": "./src/hono/index.ts",
+    "./model": "./src/model/index.ts",
+    "./entity": "./src/entity/index.ts",
+    "./routes": "./src/routes/index.ts",
+    "./openapi": "./src/openapi/index.ts",
+    "./source": "./src/source/index.ts",
+    "./testing": "./src/testing/index.ts",
+    "./validation": "./src/validation/index.ts"
+  },
+  "scripts": {
+    "build": "pnpm run type-check",
+    "type-check": "NODE_OPTIONS=--max-old-space-size=4096 tsc -p tsconfig.json --noEmit --singleThreaded",
+    "lint": "oxlint src",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "drizzle-orm": "1.0.0-rc.4",
+    "hono": "^4.12.27",
+    "zod": "^4.5.0"
+  },
+  "devDependencies": {
+    "oxlint": "1.79.0",
+    "typescript": "7.0.2",
+    "vitest": "^2.1.9"
+  }
+}

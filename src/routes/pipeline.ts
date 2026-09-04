@@ -1,0 +1,100 @@
+import { toHttpError } from '../errors'
+import type { RouteAuthorizeArgs, RouteErrorArgs, RouteHandlerArgs, RoutePipeline, ValidationIssue } from '../model/route-types'
+import type { RouteActionResult } from './define-route'
+
+export type DataWriteStage<TArgs extends RouteHandlerArgs = RouteHandlerArgs> = (args: TArgs) => void | Promise<void>
+
+export type PipelineContext = {
+  pipeline?: RoutePipeline<RouteHandlerArgs>
+}
+
+export async function runRoutePipeline<TArgs extends RouteHandlerArgs>(
+  baseArgs: RouteAuthorizeArgs<TArgs>,
+  createState: () => TArgs['state'] | Promise<TArgs['state']>,
+  modelPipeline: RoutePipeline<TArgs> | undefined,
+  routePipeline: RoutePipeline<TArgs> | undefined,
+  action: (args: TArgs) => RouteActionResult | Promise<RouteActionResult>,
+  dataWriteStage?: DataWriteStage<TArgs>,
+) {
+  let args: TArgs | undefined
+  try {
+    const authResponse = (await runAuthorize(baseArgs, modelPipeline)) ?? (await runAuthorize(baseArgs, routePipeline))
+    if (authResponse) return authResponse
+
+    args = { ...baseArgs, state: await createState() } as TArgs
+    if (dataWriteStage) await dataWriteStage(args)
+    await runBefore(args, modelPipeline)
+    await runBefore(args, routePipeline)
+
+    const validationResponse = (await runValidate(args, modelPipeline)) ?? (await runValidate(args, routePipeline))
+    if (validationResponse) return validationResponse
+
+    let response = toResponse(args, await action(args))
+    response = (await runAfter(args, response, routePipeline)) ?? response
+    response = (await runAfter(args, response, modelPipeline)) ?? response
+    return response
+  } catch (error) {
+    const errorArgs: RouteErrorArgs<TArgs> = { ...baseArgs, ...(args ? { state: args.state } : {}), error }
+    const response = (await runError(errorArgs, routePipeline)) ?? (await runError(errorArgs, modelPipeline))
+    if (response) return response
+    const httpError = toHttpError(error)
+    if (httpError) return baseArgs.c.json({ error: httpError.code, message: httpError.message || undefined, issues: httpError.issues }, httpError.status as 400)
+    throw error
+  }
+}
+
+function toResponse<TArgs extends RouteHandlerArgs>(args: TArgs, result: RouteActionResult) {
+  return result instanceof Response ? result : args.c.json(result)
+}
+
+export function normalizePipeline<TArgs extends RouteHandlerArgs>(pipeline: RoutePipeline<TArgs> | undefined) {
+  return pipeline as RoutePipeline<RouteHandlerArgs> | undefined
+}
+
+function list<T>(value: T | T[] | undefined): T[] {
+  if (!value) return []
+  return Array.isArray(value) ? value : [value]
+}
+
+async function runBefore<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline: RoutePipeline<TArgs> | undefined) {
+  for (const hook of list(pipeline?.before)) {
+    const patch = await hook(args)
+    if (patch) Object.assign(args.state, patch)
+  }
+}
+
+async function runAuthorize<TArgs extends RouteHandlerArgs>(args: RouteAuthorizeArgs<TArgs>, pipeline: RoutePipeline<TArgs> | undefined) {
+  for (const hook of list(pipeline?.authorize)) {
+    const result = await hook(args)
+    if (result instanceof Response) return result
+    if (result) return args.c.json({ error: 'forbidden', issues: normalizeIssues(result) }, 403)
+  }
+  return undefined
+}
+
+async function runValidate<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline: RoutePipeline<TArgs> | undefined) {
+  for (const hook of list(pipeline?.validate)) {
+    const result = await hook(args)
+    if (result) return args.c.json({ error: 'validation_error', issues: normalizeIssues(result) }, 400)
+  }
+  return undefined
+}
+
+async function runAfter<TArgs extends RouteHandlerArgs>(args: TArgs, response: Response, pipeline: RoutePipeline<TArgs> | undefined) {
+  let next = response
+  for (const hook of list(pipeline?.after)) next = (await hook({ ...args, response: next })) ?? next
+  return next
+}
+
+async function runError<TArgs extends RouteHandlerArgs>(args: RouteErrorArgs<TArgs>, pipeline: RoutePipeline<TArgs> | undefined) {
+  for (const hook of list(pipeline?.error)) {
+    const response = await hook(args)
+    if (response) return response
+  }
+  return undefined
+}
+
+function normalizeIssues(issue: ValidationIssue | ValidationIssue[]) {
+  const issues = Array.isArray(issue) ? issue : [issue]
+  return issues.map((item) => (typeof item === 'string' ? { message: item } : item))
+}
