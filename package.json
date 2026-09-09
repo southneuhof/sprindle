@@ -8,8 +8,23 @@
     "type": "git",
     "url": "git+https://github.com/southneuhof/sprindle.git"
   },
+  "files": [
+    "src",
+    "dist-types",
+    "dist-tooling",
+    "tooling/*.mjs"
+  ],
+  "bin": {
+    "sprindle-routes-build": "./dist-tooling/build.js",
+    "sprindle-routes-check": "./dist-tooling/check.js",
+    "sprindle-routes-dev": "./dist-tooling/dev.js",
+    "sprindle-language-server": "./dist-tooling/language-server.js"
+  },
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "types": "./dist-types/index.d.ts",
+      "default": "./src/index.ts"
+    },
     "./hono": "./src/hono/index.ts",
     "./model": "./src/model/index.ts",
     "./entity": "./src/entity/index.ts",
@@ -17,22 +32,33 @@
     "./openapi": "./src/openapi/index.ts",
     "./source": "./src/source/index.ts",
     "./testing": "./src/testing/index.ts",
-    "./validation": "./src/validation/index.ts"
+    "./validation": "./src/validation/index.ts",
+    "./tooling": "./dist-tooling/index.js"
   },
   "scripts": {
     "build": "pnpm run type-check",
-    "type-check": "tsc -p tsconfig.json --noEmit --singleThreaded",
+    "prepack": "node tooling/package.mjs",
+    "type-check": "tsc -p tsconfig.json --noEmit --singleThreaded && node tooling/package.mjs",
     "lint": "oxlint src",
-    "test": "vitest run"
+    "test": "node tooling/package.mjs && vitest run",
+    "test:tooling": "node tooling/package.mjs && vitest run src/tooling",
+    "test:editor": "node editor/build.mjs && node editor/test/run.mjs",
+    "editor:install": "node editor/install.mjs",
+    "test:editor-install": "node editor/test/install.mjs"
   },
   "dependencies": {
     "drizzle-orm": "1.0.0-rc.4",
+    "esbuild": "^0.25.12",
     "hono": "^4.12.27",
+    "jsonc-parser": "^3.3.1",
+    "typescript": "7.0.2",
     "zod": "^4.5.0"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@babel/parser": "^7.29.7",
+    "@vscode/test-electron": "^2.5.2",
     "oxlint": "1.79.0",
-    "typescript": "7.0.2",
     "vitest": "^2.1.9"
   }
 }

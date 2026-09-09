@@ -1,8 +1,9 @@
+import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../../testing/file-manifest'
 import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
-import { defineRoute } from '../../routes'
-import { defineModel } from '../../model'
-import { installSprindle, requestContext, sprindleOnError, type Logger } from '..'
+
+
+import { requestContext, sprindleOnError, type Logger } from '..'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
 
 const source: ModelSource<{ id: string }> = {
@@ -28,12 +29,12 @@ const source: ModelSource<{ id: string }> = {
 const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 
 function buildApp(logger?: Logger) {
-  const model = defineModel({
+  const model = defineFileModelFixture({
     path: '/items',
     entity: itemEntity,
     routes: {
-      ok: defineRoute({ method: 'get', action: ({ c }) => c.json({ ok: true }) }),
-      broken: defineRoute({
+      ok: testDefineRoute({ method: 'get', action: ({ c }) => c.json({ ok: true }) }),
+      broken: testDefineRoute({
         method: 'get',
         action: () => {
           throw new Error('boom')
@@ -43,7 +44,7 @@ function buildApp(logger?: Logger) {
   })
 
   const app = new Hono().onError(sprindleOnError).use('*', requestContext())
-  return installSprindle(app, [model] as const, { logger })
+  return testInstallSprindle(app, [model] as const, { logger })
 }
 
 describe('requestContext', () => {

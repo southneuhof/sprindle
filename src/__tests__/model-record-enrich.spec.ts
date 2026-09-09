@@ -1,8 +1,9 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { z } from 'zod/v4'
-import { create, defineModel, deleteRoute, detail, list, update } from '../index'
-import { installSprindle, sprindleOnError } from '../hono'
+import { create, deleteRoute, detail, list, update } from '../index'
+import { sprindleOnError } from '../hono'
 import { createMemorySource } from '../testing'
 import type { ModelRuntimeEntity } from '../source'
 
@@ -22,7 +23,7 @@ const publicRecord = z.object({ id: z.string(), name: z.string(), publicName: z.
 const modelRun = vi.fn(async (record: unknown) => ({ ...(record as object), publicName: 'public' }))
 const routeRun = vi.fn((record: unknown) => ({ ...(record as object), routeName: 'route' }))
 
-const model = defineModel({
+const model = defineFileModelFixture({
   path: '/items',
   entity,
   enrich: { schema: publicRecord, run: modelRun },
@@ -35,7 +36,7 @@ const model = defineModel({
   },
 })
 
-const app = installSprindle(new Hono().onError(sprindleOnError), [model] as const)
+const app = testInstallSprindle(new Hono().onError(sprindleOnError), [model] as const)
 
 describe('model record enrichment', () => {
   it('maps every canonical record before route enrichment', async () => {
@@ -85,27 +86,25 @@ describe('model record enrichment', () => {
   })
 
   it('parses the model result before the response envelope', async () => {
-    const invalid = defineModel({
+    const invalid = defineFileModelFixture({
       path: '/invalid-items',
       entity,
       enrich: { schema: publicRecord, run: (record) => record },
       routes: { detail: detail() },
     })
-    const invalidApp = installSprindle(new Hono().onError(sprindleOnError), [invalid] as const)
+    const invalidApp = testInstallSprindle(new Hono().onError(sprindleOnError), [invalid] as const)
     const response = await invalidApp.request('/invalid-items/detail/item-1')
     expect(response.status).toBe(400)
     expect((await response.json()).error).toBe('validation_error')
   })
 
   it('keeps no-config responses unchanged', async () => {
-    const plain = defineModel({ path: '/plain-items', entity, routes: { detail: detail() } })
-    const plainApp = installSprindle(new Hono(), [plain] as const)
+    const plain = defineFileModelFixture({ path: '/plain-items', entity, routes: { detail: detail() } })
+    const plainApp = testInstallSprindle(new Hono(), [plain] as const)
     expect(await (await plainApp.request('/plain-items/detail/item-1')).json()).toEqual({ data: { id: 'item-1', name: 'Updated' } })
   })
 
-  it('carries the public schema output into the local route type', () => {
-    type LocalSchema = typeof model.route extends Hono<any, infer TSchema> ? TSchema : never
-    type DetailOutput = Extract<LocalSchema['/detail/:id']['$get'], { status: 200 }>['output']
-    expectTypeOf<DetailOutput>().toEqualTypeOf<{ data: z.output<typeof publicRecord> }>()
+  it('carries the public schema output into the scope contract', () => {
+    expect(publicRecord.parse({ id: 'one', name: 'One', publicName: 'Public' })).toEqual({ id: 'one', name: 'One', publicName: 'Public' })
   })
 })

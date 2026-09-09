@@ -1,10 +1,11 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, text } from 'drizzle-orm/pg-core'
 import { z } from 'zod/v4'
-import { createEntity, defineModel } from '../model'
+import { createEntity } from '../model'
 import { create, detail, update } from '../routes'
-import { installSprindle, requestContext, sprindleOnError } from '../hono'
+import { requestContext, sprindleOnError } from '../hono'
 import { createMemorySource } from '../testing'
 
 const records = pgTable('record_enrich_items', {
@@ -41,9 +42,9 @@ const updateEnrich = vi.fn((record: unknown, args: { state: { id: string; input:
   return { ...(record as object), enriched: 'update' }
 })
 
-const app = installSprindle(
+const app = testInstallSprindle(
   new Hono().onError(sprindleOnError).use('*', requestContext()),
-  [defineModel({
+  [defineFileModelFixture({
     path: '/record-enrich-items',
     entity,
     routes: {

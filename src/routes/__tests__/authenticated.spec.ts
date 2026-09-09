@@ -1,9 +1,10 @@
+import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../../testing/file-manifest'
 import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { authenticated } from '../authenticated'
-import { defineRoute } from '../define-route'
-import { defineModel } from '../../model'
-import { installSprindle, sprindleNotFound, sprindleOnError } from '../../hono'
+
+
+import { sprindleNotFound, sprindleOnError } from '../../hono'
 import type { IdentityResolver, ModelRuntimeEntity, ModelSource } from '../../source'
 
 const source: ModelSource<{ id: string }> = {
@@ -29,26 +30,26 @@ const source: ModelSource<{ id: string }> = {
 const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 
 function buildApp(identity?: IdentityResolver) {
-  const guarded = defineModel({
+  const guarded = defineFileModelFixture({
     path: '/guarded',
     entity: itemEntity,
     authorize: [authenticated()],
     routes: {
-      read: defineRoute({ method: 'get', action: async ({ c, identity: resolve }) => c.json({ identity: await resolve() }) }),
-      denied: defineRoute({ method: 'get', authorize: [() => 'Access denied.'], action: ({ c }) => c.json({ ok: true }) }),
+      read: testDefineRoute({ method: 'get', action: async ({ c, identity: resolve }) => c.json({ identity: await resolve() }) }),
+      denied: testDefineRoute({ method: 'get', authorize: [() => 'Access denied.'], action: ({ c }) => c.json({ ok: true }) }),
     },
   })
 
-  const open = defineModel({
+  const open = defineFileModelFixture({
     path: '/open',
     entity: itemEntity,
     routes: {
-      read: defineRoute({ method: 'get', action: ({ c }) => c.json({ ok: true }) }),
+      read: testDefineRoute({ method: 'get', action: ({ c }) => c.json({ ok: true }) }),
     },
   })
 
   const app = new Hono().onError(sprindleOnError).notFound(sprindleNotFound)
-  return installSprindle(app, [guarded, open] as const, { identity })
+  return testInstallSprindle(app, [guarded, open] as const, { identity })
 }
 
 describe('authenticated guard', () => {
@@ -60,12 +61,12 @@ describe('authenticated guard', () => {
 
   it('authorizes before state parsing and before hooks', async () => {
     const order: string[] = []
-    const guarded = defineModel({
+    const guarded = defineFileModelFixture({
       path: '/guarded',
       entity: itemEntity,
       authorize: [authenticated()],
       routes: {
-        payload: defineRoute({
+        payload: testDefineRoute({
           method: 'post',
           state: async ({ c }) => {
             order.push('state')
@@ -77,7 +78,7 @@ describe('authenticated guard', () => {
       },
     })
     const app = new Hono().onError(sprindleOnError).notFound(sprindleNotFound)
-    installSprindle(app, [guarded] as const)
+    testInstallSprindle(app, [guarded] as const)
 
     const response = await app.request('/guarded/payload', {
       method: 'POST',

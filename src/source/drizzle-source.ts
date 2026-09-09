@@ -235,8 +235,8 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       const rows = await selectRows().where(and(wherePrimaryKey(id), scopeSql as never)).limit(1)
       return rows[0] ? schemas.select.parse(rows[0]) : null
     },
-    async create({ input, values = {} }) {
-      const parsed = schemas.create.parse(input)
+    async create({ input, inputParsed, values = {} }) {
+      const parsed = inputParsed ? input as TCreate : schemas.create.parse(input)
       const { row, relations } = splitRelationInput({ ...parsed, ...values }, relationByField)
       applyOneRelationValues(row, relations, tableColumns)
       return withTransaction(database, async (tx) => {
@@ -249,8 +249,8 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
         return schemas.select.parse(rows[0])
       })
     },
-    async update({ id, input, values = {}, where: scopeWhere }) {
-      const parsed = schemas.update.parse(input)
+    async update({ id, input, inputParsed, values = {}, where: scopeWhere }) {
+      const parsed = inputParsed ? input as TUpdate : schemas.update.parse(input)
       const { row, relations } = splitRelationInput({ ...parsed, ...values }, relationByField)
       applyOneRelationValues(row, relations, tableColumns)
       return withTransaction(database, async (tx) => {

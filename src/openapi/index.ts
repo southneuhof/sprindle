@@ -1,184 +1,63 @@
 import { z } from 'zod/v4'
-import { defineRoute } from '../routes'
-import { isModelRoute } from '../model/route-types'
-import { isResourceRoute, RESOURCE_STATUS, resourceOperation, type ResourceOperation } from '../model/resource-route'
-import { iterRoutes } from '../model/route-tree'
-import type { ModelRoute } from '../model/route-types'
-import type { DefinedModel } from '../model'
-import type { SprindleInstallable } from '../hono'
+import { getRouteManifest, type FileRouteManifest } from '../hono'
+import { isFileRoute } from '../routes'
+import { resolveScopeMetadata } from '../hono/file-routes'
 
 export type OpenApiInfo = { title: string; version: string }
-export type OpenApiDocument = {
-  openapi: '3.1.0'
-  info: OpenApiInfo
-  paths: Record<string, Record<string, unknown>>
-  components: { schemas: Record<string, unknown> }
-}
+export type OpenApiDocument = { openapi: '3.1.0'; info: OpenApiInfo; paths: Record<string, Record<string, unknown>>; components: { schemas: Record<string, unknown> } }
 
-type EntitySchemas = { create?: unknown; update?: unknown; select?: unknown }
-
-const RESERVED_LIST_QUERY_PARAMETERS = [
-  { name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
-  { name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
-  { name: 'search', schema: { type: 'string' } },
-  { name: 'sort', schema: { type: 'string' } },
-  { name: 'order', schema: { type: 'string', enum: ['asc', 'desc'], default: 'asc' } },
-]
-
-const ERROR_SCHEMA = {
+const errors = {
   type: 'object',
   properties: {
     error: { type: 'string' },
     message: { type: 'string' },
-    issues: {
-      type: 'array',
-      items: { type: 'object', properties: { field: { type: 'string' }, message: { type: 'string' } }, required: ['message'] },
-    },
+    issues: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, message: { type: 'string' } }, required: ['message'] } },
   },
   required: ['error'],
 }
+const listParameters = [
+  { name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+  { name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+  { name: 'search', schema: { type: 'string' } }, { name: 'sort', schema: { type: 'string' } },
+  { name: 'order', schema: { type: 'string', enum: ['asc', 'desc'], default: 'asc' } },
+]
 
-/** Builds an OpenAPI 3.1 document from the same models `installSprindle` mounts. */
-export function generateOpenApi(installables: readonly SprindleInstallable[], info: OpenApiInfo): OpenApiDocument {
+export function generateOpenApi(manifest: FileRouteManifest, info: OpenApiInfo): OpenApiDocument {
   const document: OpenApiDocument = { openapi: '3.1.0', info, paths: {}, components: { schemas: {} } }
-
-  const handleModel = (model: DefinedModel) => {
-    const entity = model.context?.entity as ({ name?: string } & { schemas?: EntitySchemas }) | undefined
-    const entityName = componentName(model.name || model.path)
-    registerEntitySchemas(document, entityName, entity?.schemas, model.context?.enrich)
-    walkRouteTree(document, model.routes as Record<string, unknown>, [], model.path, entityName)
-  }
-
-  const handle = (installable: SprindleInstallable) => {
-    if (isModelRoute(installable)) {
-      if (isResourceRoute(installable)) throw new Error('Canonical resource routes must be mounted inside defineModel().')
-      addOperation(document, installable.path, installable, undefined)
-      return
+  const publicNames = new Map<unknown, string>()
+  const publicCounts = new Map<string, number>()
+  for (const entry of manifest) for (const method of entry.methods) {
+    const route = entry.handlers[method]
+    if (!isFileRoute(route)) continue
+    const metadata = resolveScopeMetadata(entry.scopes, entry.httpPath)
+    const entity = metadata.entity as { name?: string; schemas?: { select?: unknown; create?: unknown; update?: unknown } } | undefined
+    const entityName = entity ? componentName(entity.name ?? entry.httpPath) : undefined
+    let name = entityName
+    const publicKey = metadata.enrich ?? entity
+    if (entityName && publicKey) {
+      name = publicNames.get(publicKey)
+      if (!name) { const count = (publicCounts.get(entityName) ?? 0) + 1; publicCounts.set(entityName, count); name = count === 1 ? entityName : `${entityName}Public${count}`; publicNames.set(publicKey, name) }
     }
-    if ('models' in installable) {
-      for (const nested of installable.models) handle(nested)
-      return
-    }
-    if ('route' in installable) handleModel(installable)
+    if (name && entityName && entity?.schemas) register(document, entityName, name, entity.schemas, metadata.enrich)
+    const path = entry.httpPath.replace(/:([A-Za-z0-9_]+)/g, '{$1}')
+    const statuses = route.kind === 'create' ? [201, 400, 401, 403, 409, 422, 500] : route.kind === 'detail' || route.kind === 'update' || route.kind === 'delete' ? [200, 400, 401, 403, 404, 500] : [200, 400, 401, 403, 500]
+    const success = statuses[0]
+    const operation: Record<string, unknown> = { responses: Object.fromEntries(statuses.map((status) => [status, json(status === success ? 'Response' : 'Error', status === success ? successSchema(route.kind, name) : errors)])) }
+    const parameters = [...entry.parameters.map((parameter) => ({ name: parameter, in: 'path', required: true, schema: { type: 'string' } })), ...(route.kind === 'list' ? listParameters.map((parameter) => ({ ...parameter, in: 'query', required: false })) : [])]
+    if (parameters.length) operation.parameters = parameters
+    if (entityName && (route.kind === 'create' || route.kind === 'update')) operation.requestBody = { required: true, content: { 'application/json': { schema: { $ref: `#/components/schemas/${entityName}${route.kind === 'create' ? 'Create' : 'Update'}` } } } }
+    if (route.kind === 'route' && isZod(route.config.openapi && (route.config.openapi as { requestBody?: unknown }).requestBody)) operation.requestBody = { required: true, content: { 'application/json': { schema: z.toJSONSchema((route.config.openapi as { requestBody: z.ZodType }).requestBody, { io: 'input', unrepresentable: 'any' }) } } }
+    document.paths[path] ??= {}; document.paths[path][method.toLowerCase()] = operation
   }
-
-  for (const installable of installables) handle(installable)
-
   return document
 }
 
-/** A `GET` route serving the generated document; mount it like any other top-level route. */
-export function openapiRoute<const TPath extends string = '/openapi.json'>(
-  installables: readonly SprindleInstallable[],
-  info: OpenApiInfo,
-  path: TPath = '/openapi.json' as TPath,
-) {
-  return defineRoute({
-    path,
-    method: 'get',
-    // Public by default; attach `authenticated()` in the app if the document is not public.
-    action: ({ c }) => c.json(generateOpenApi(installables, info)),
-  })
+export function generateInstalledOpenApi(c: import('hono').Context, info: OpenApiInfo) {
+  return generateOpenApi(getRouteManifest(c), info)
 }
 
-function walkRouteTree(
-  document: OpenApiDocument,
-  tree: Record<string, unknown>,
-  segments: string[],
-  prefix: string,
-  entityName: string | undefined,
-) {
-  for (const { route, keyPath } of iterRoutes(tree as never)) {
-    addOperation(document, `${joinPath(prefix, `/${keyPath.join('/')}`)}${route.path}`, route, entityName)
-  }
-}
-
-function addOperation(document: OpenApiDocument, rawPath: string, route: ModelRoute, entityName: string | undefined) {
-  const path = normalizePath(rawPath)
-  const contract = resourceOperation(route)
-  const errorStatuses = contract ? RESOURCE_STATUS[contract].errors : [400, 401, 403, 500]
-  const operation: Record<string, unknown> = {
-    responses: {
-      ...successResponse(contract, entityName),
-      ...Object.fromEntries(errorStatuses.map((status) => [status, jsonResponse('Error', ERROR_SCHEMA)])),
-    },
-  }
-
-  const parameters = [
-    ...pathParameters(path),
-    ...(contract === 'list' ? RESERVED_LIST_QUERY_PARAMETERS.map((parameter) => ({ ...parameter, in: 'query', required: false })) : []),
-  ]
-  if (parameters.length) operation.parameters = parameters
-  if (contract === 'list') operation.description = 'Any query parameter beyond the reserved ones filters on an equal column value.'
-  if (!contract) operation.description = 'Response shape not declared.'
-
-  if (entityName && (contract === 'create' || contract === 'update')) {
-    const schemaName = `${entityName}${contract === 'create' ? 'Create' : 'Update'}`
-    if (document.components.schemas[schemaName]) {
-      operation.requestBody = { required: true, content: { 'application/json': { schema: { $ref: `#/components/schemas/${schemaName}` } } } }
-    }
-  }
-  if (!contract && isZodSchema(route.openapi?.requestBody)) {
-    operation.requestBody = { required: true, content: { 'application/json': { schema: z.toJSONSchema(route.openapi.requestBody, { io: 'input', unrepresentable: 'any' }) } } }
-  }
-
-  document.paths[path] ??= {}
-  document.paths[path][route.method] = operation
-}
-
-function successResponse(contract: ResourceOperation | undefined, entityName: string | undefined) {
-  const selectRef = entityName ? { $ref: `#/components/schemas/${entityName}` } : {}
-
-  if (contract === 'list') {
-    return {
-      '200': jsonResponse('List', {
-        type: 'object',
-        properties: { data: { type: 'array', items: selectRef }, page: { type: 'integer' }, limit: { type: 'integer' }, total: { type: 'integer' } },
-        required: ['data', 'page', 'limit', 'total'],
-      }),
-    }
-  }
-  if (contract === 'detail' || contract === 'update') return { '200': jsonResponse('Record', { type: 'object', properties: { data: selectRef }, required: ['data'] }) }
-  if (contract === 'create') return { '201': jsonResponse('Created', { type: 'object', properties: { data: selectRef }, required: ['data'] }) }
-  if (contract === 'delete') return { '200': jsonResponse('Deleted', { type: 'object', properties: { ok: { const: true } }, required: ['ok'] }) }
-  return { '200': jsonResponse('Response shape not declared.', {}) }
-}
-
-function jsonResponse(description: string, schema: object) {
-  return { description, content: { 'application/json': { schema } } }
-}
-
-function registerEntitySchemas(document: OpenApiDocument, entityName: string, schemas: EntitySchemas | undefined, enrich?: { schema?: unknown }) {
-  if (!schemas) return
-  const named: [string, unknown, 'input' | 'output'][] = [
-    [entityName, enrich?.schema ?? schemas.select, 'output'],
-    [`${entityName}Create`, schemas.create, 'input'],
-    [`${entityName}Update`, schemas.update, 'input'],
-  ]
-  for (const [name, schema, io] of named) {
-    if (!isZodSchema(schema)) continue
-    document.components.schemas[name] = z.toJSONSchema(schema, { io, unrepresentable: 'any' })
-  }
-}
-
-function isZodSchema(value: unknown): value is z.ZodType {
-  return Boolean(value && typeof value === 'object' && '_zod' in (value as Record<string, unknown>))
-}
-
-function componentName(value: string) {
-  const cleaned = value.replace(/[^a-zA-Z0-9]+(.)/g, (_match, character: string) => character.toUpperCase()).replace(/[^a-zA-Z0-9]/g, '')
-  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
-}
-
-function joinPath(prefix: string, path: string) {
-  if (!prefix || prefix === '/') return path
-  return `${prefix}${path}`
-}
-
-function normalizePath(path: string) {
-  return path.replace(/\/{2,}/g, '/').replace(/:([A-Za-z0-9_]+)/g, '{$1}')
-}
-
-function pathParameters(path: string) {
-  return [...path.matchAll(/\{([A-Za-z0-9_]+)\}/g)].map((match) => ({ name: match[1], in: 'path', required: true, schema: { type: 'string' } }))
-}
+function successSchema(kind: string, name?: string) { const record = name ? { $ref: `#/components/schemas/${name}` } : {}; if (kind === 'list') return { type: 'object', properties: { data: { type: 'array', items: record }, page: { type: 'integer' }, limit: { type: 'integer' }, total: { type: 'integer' } }, required: ['data', 'page', 'limit', 'total'] }; if (kind === 'delete') return { type: 'object', properties: { ok: { const: true } }, required: ['ok'] }; if (['detail', 'create', 'update'].includes(kind)) return { type: 'object', properties: { data: record }, required: ['data'] }; return {} }
+function json(description: string, schema: object) { return { description, content: { 'application/json': { schema } } } }
+function isZod(value: unknown): value is z.ZodType { return Boolean(value && typeof value === 'object' && '_zod' in (value as object)) }
+function componentName(value: string) { const clean = value.replace(/[^a-zA-Z0-9]+(.)/g, (_match, character: string) => character.toUpperCase()).replace(/[^a-zA-Z0-9]/g, ''); return clean.charAt(0).toUpperCase() + clean.slice(1) }
+function register(document: OpenApiDocument, entityName: string, publicName: string, schemas: { select?: unknown; create?: unknown; update?: unknown }, enrich: unknown) { const publicSchema = (enrich as { schema?: unknown } | undefined)?.schema ?? schemas.select; for (const [schemaName, schema, io] of [[publicName, publicSchema, 'output'], [`${entityName}Create`, schemas.create, 'input'], [`${entityName}Update`, schemas.update, 'input']] as const) if (isZod(schema)) document.components.schemas[schemaName] = z.toJSONSchema(schema, { io, unrepresentable: 'any' }) }

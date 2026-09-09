@@ -1,12 +1,13 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 // Server-owned write values: a model-level `before` hook stamps audit columns through
 // `state.values`; the canonical create factory forwards them and they win over forged client keys.
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, text } from 'drizzle-orm/pg-core'
 import { z } from 'zod/v4'
-import { createEntity, defineModel } from '../model'
+import { createEntity } from '../model'
 import { authenticated, create } from '../routes'
-import { installSprindle, requestContext, sprindleOnError } from '../hono'
+import { requestContext, sprindleOnError } from '../hono'
 import { createMemorySource } from '../testing'
 
 const audited = pgTable('audited', {
@@ -28,10 +29,10 @@ const source = createMemorySource<{ id: string; name: string; createdByUserId?: 
 
 auditedEntity.source = source as never
 
-const app = installSprindle(
+const app = testInstallSprindle(
   new Hono().onError(sprindleOnError).use('*', requestContext()),
   [
-    defineModel({
+    defineFileModelFixture({
       path: '/audited',
       entity: auditedEntity,
       authorize: [authenticated()],

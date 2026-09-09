@@ -1,9 +1,10 @@
+import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../testing/file-manifest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { z } from 'zod/v4'
-import { createEntity, defineModel } from '../model'
-import { create, defineRoute, update } from '../routes'
-import { installSprindle, sprindleOnError, type DataWriteHook } from '../hono'
+import { createEntity } from '../model'
+import { create, update } from '../routes'
+import { sprindleOnError, type DataWriteHook } from '../hono'
 import { createMemorySource } from '../testing'
 
 const entity = createEntity({
@@ -30,10 +31,10 @@ const dataWriteHook = vi.fn(async (args: Parameters<DataWriteHook>[0]) => {
   return { owner: 'server-update' }
 })
 
-const app = installSprindle(
+const app = testInstallSprindle(
   new Hono().onError(sprindleOnError),
   [
-    defineModel({
+    defineFileModelFixture({
       path: '/data-write-items',
       entity,
       routes: {
@@ -45,7 +46,7 @@ const app = installSprindle(
           validate: [() => void order.push('validate')],
         }),
         update: update(),
-        custom: defineRoute({
+        custom: testDefineRoute({
           method: 'get',
           state: () => ({ values: { owner: 'custom' } }),
           action: ({ state }) => ({ data: state.values }),

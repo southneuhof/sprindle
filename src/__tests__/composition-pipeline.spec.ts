@@ -1,11 +1,12 @@
+import { defineFileModelFixture, testDefineModule, testDefineRoute, testInstallSprindle } from '../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { z } from 'zod/v4'
-import { createEntity, defineModel, defineModule } from '../model'
+import { createEntity } from '../model'
 import type { DomainEntity } from '../model'
-import { create, defineRoute, list } from '../routes'
+import { create, list } from '../routes'
 import { forbidden } from '../errors'
-import { installSprindle } from '../hono'
+
 import { createMemorySource } from '../testing'
 
 type Expect<T extends true> = T
@@ -31,7 +32,7 @@ function makeModel(entity: DomainEntity, order: string[]) {
   const record = (label: string) => () => {
     order.push(label)
   }
-  return defineModel({
+  return defineFileModelFixture({
     path: '/items',
     entity,
     before: [record('model-before')],
@@ -42,7 +43,7 @@ function makeModel(entity: DomainEntity, order: string[]) {
       list: list(),
       store: create(),
       // A route-tree key appends to the route's own path; empty path keeps /items/boom.
-      boom: defineRoute({
+      boom: testDefineRoute({
         method: 'get',
         path: '',
         before: [record('route-before')],
@@ -61,7 +62,7 @@ describe('composition pipeline', () => {
   it('runs before hooks outermost-first and after/error hooks outermost-last', async () => {
     const order: string[] = []
     const bundles = [
-      defineModule({
+      testDefineModule({
         pipeline: {
           before: [() => void order.push('bundle-before')],
           authorize: [() => void order.push('bundle-authorize')],
@@ -71,7 +72,7 @@ describe('composition pipeline', () => {
         models: [makeModel(makeEntity(), order)],
       }),
     ] as const
-    const app = installSprindle(new Hono(), bundles, {
+    const app = testInstallSprindle(new Hono(), bundles, {
       pipeline: {
         before: [() => void order.push('install-before')],
         authorize: [() => void order.push('install-authorize')],
@@ -100,8 +101,8 @@ describe('composition pipeline', () => {
 
   it('lets install-scope authorize short-circuit every inner scope', async () => {
     const order: string[] = []
-    const bundles = [defineModule({ models: [makeModel(makeEntity(), order)] })] as const
-    const app = installSprindle(new Hono(), bundles, {
+    const bundles = [testDefineModule({ models: [makeModel(makeEntity(), order)] })] as const
+    const app = testInstallSprindle(new Hono(), bundles, {
       pipeline: { before: [() => void order.push('install-before')], authorize: [() => 'install says no'] },
     })
 
@@ -115,8 +116,8 @@ describe('composition pipeline', () => {
 
   it('inherits install-scope state patches on canonical writes (values bag)', async () => {
     const entity = makeEntity()
-    const bundles = [defineModule({ models: [makeModel(entity, [])] })] as const
-    const app = installSprindle(new Hono(), bundles, {
+    const bundles = [testDefineModule({ models: [makeModel(entity, [])] })] as const
+    const app = testInstallSprindle(new Hono(), bundles, {
       pipeline: { before: [() => ({ values: { tag: 'injected' } })] },
     })
 
@@ -130,9 +131,9 @@ describe('composition pipeline', () => {
   })
 
   it('keeps client types identical to the flat installation', () => {
-    const bundles = [defineModule({ models: [makeModel(makeEntity(), [])] })] as const
-    const bundled = installSprindle(new Hono(), bundles, {})
-    const flat = installSprindle(new Hono(), [[...bundles[0].models][0]] as const, {})
+    const bundles = [testDefineModule({ models: [makeModel(makeEntity(), [])] })] as const
+    const bundled = testInstallSprindle(new Hono(), bundles, {})
+    const flat = testInstallSprindle(new Hono(), [[...bundles[0].models][0]] as const, {})
     type _parity = Expect<Equal<typeof bundled, typeof flat>>
     expect(bundled.request).toBeTypeOf('function')
   })

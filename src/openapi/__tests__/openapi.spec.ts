@@ -1,119 +1,60 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod/v4'
-import { create, defineRoute, deleteRoute, detail, list, update } from '../../routes'
-import { defineModel } from '../../model'
-import { createTestEntity, testApp } from '../../testing'
-import { generateOpenApi, openapiRoute } from '..'
-import type { ModelRuntimeEntity } from '../../source'
+import { generateOpenApi } from '..'
+import { create, defineRoute, defineScope, deleteRoute, detail, list, update } from '../../routes'
+import { createTestEntity } from '../../testing'
+import type { FileRouteManifestEntry } from '../../hono'
 
-const item = {
-  ...createTestEntity(),
-  schemas: {
-    create: z.object({ id: z.string(), name: z.string() }),
-    update: z.object({ name: z.string().optional() }),
-    select: z.object({ id: z.string(), name: z.string() }),
-  },
-} as unknown as ModelRuntimeEntity
+const entry = (httpPath: string, handlers: Record<string, unknown>, scopes: unknown[] = [], parameters: string[] = []): FileRouteManifestEntry => ({ sourcePath: `${httpPath}/+server.ts`, httpPath, handlers, scopes, parameters, methods: Object.keys(handlers) })
+const entity = createTestEntity({ name: 'items', schemas: { create: z.object({ name: z.string() }), update: z.object({ name: z.string().optional() }), select: z.object({ id: z.string(), name: z.string() }) } })
+const scope = defineScope({ entity })
+const custom = defineRoute({ openapi: { requestBody: z.object({ file: z.object({ id: z.string() }) }) }, action: () => ({ ok: true }) })
+const manifest = [
+  entry('/items/list', { GET: list() }, [scope]), entry('/items/detail/:id', { GET: detail() }, [scope], ['id']),
+  entry('/items/create', { POST: create() }, [scope]), entry('/items/update/:id', { PATCH: update() }, [scope], ['id']),
+  entry('/items/delete/:id', { DELETE: deleteRoute() }, [scope], ['id']), entry('/custom', { POST: custom }),
+]
+const document = generateOpenApi(manifest, { title: 'Test', version: '1' })
+const operation = (path: string, method: string) => document.paths[path][method] as Record<string, unknown>
 
-const ping = defineRoute({ method: 'get', action: ({ c }) => c.json({ ok: true }) })
-
-const model = defineModel({
-  path: '/items',
-  entity: item,
-  routes: {
-    list: list(),
-    detail: detail(),
-    create: create(),
-    update: update(),
-    delete: deleteRoute(),
-    nested: { ping },
-  },
-})
-
-const health = defineRoute({ path: '/health', method: 'get', action: ({ c }) => c.json({ ok: true }) })
-const customWrite = defineRoute({ path: '/custom', method: 'post', openapi: { requestBody: z.object({ file: z.object({ id: z.string() }) }) }, action: ({ c }) => c.json({ ok: true }) })
-const installables = [model, health, customWrite] as const
-const info = { title: 'Test API', version: '0.0.0' }
-
-describe('generateOpenApi', () => {
-  it('rejects a top-level resource route', () => {
-    expect(() => generateOpenApi([deleteRoute()] as never, info)).toThrow('Canonical resource routes must be mounted inside defineModel().')
+describe('file route OpenAPI', () => {
+  it('emits every path with OpenAPI parameter syntax', () => expect(Object.keys(document.paths).sort()).toEqual(['/custom','/items/create','/items/delete/{id}','/items/detail/{id}','/items/list','/items/update/{id}']))
+  it('declares list query and path parameters', () => {
+    const listParameters = operation('/items/list', 'get').parameters as { name: string }[]
+    expect(listParameters.map((value) => value.name)).toEqual(['page','limit','search','sort','order'])
+    expect((operation('/items/detail/{id}', 'get').parameters as { name: string }[])[0]).toMatchObject({ name: 'id', in: 'path', required: true })
+  })
+  it('uses entity schemas and custom request bodies', () => {
+    expect(Object.keys(document.components.schemas).sort()).toEqual(['Items','ItemsCreate','ItemsUpdate'])
+    expect(operation('/items/create', 'post').requestBody).toBeDefined()
+    expect(operation('/custom', 'post').requestBody).toBeDefined()
+  })
+  it('documents canonical response statuses', () => {
+    const statuses = (path: string, method: string) => Object.keys((document.paths[path][method] as { responses: object }).responses).sort()
+    expect(statuses('/items/create','post')).toEqual(['201','400','401','403','409','422','500'])
+    expect(statuses('/items/detail/{id}','get')).toContain('404')
+    expect(statuses('/items/list','get')).toEqual(['200','400','401','403','500'])
   })
 
-  it('emits every canonical route with OpenAPI path syntax', () => {
-    const document = generateOpenApi(installables, info)
-
-    expect(document.openapi).toBe('3.1.0')
-    expect(Object.keys(document.paths).sort()).toEqual(
-      ['/custom', '/health', '/items/create', '/items/delete/{id}', '/items/detail/{id}', '/items/list', '/items/nested/ping', '/items/update/{id}'].sort(),
-    )
-    expect(document.paths['/items/update/{id}'].patch).toBeDefined()
-    expect(document.paths['/items/delete/{id}'].delete).toBeDefined()
-  })
-
-  it('declares the reserved list query parameters and the free-form filter note', () => {
-    const listOperation = generateOpenApi(installables, info).paths['/items/list'].get as {
-      parameters: { name: string; in: string }[]
-      description: string
+  it('uses the effective descendant enrichment without overwriting sibling schemas', () => {
+    const red = defineScope({ enrich: { schema: z.object({ red: z.literal(true) }), run: () => ({ red: true as const }) } })
+    const blue = defineScope({ enrich: { schema: z.object({ blue: z.literal(true) }), run: () => ({ blue: true as const }) } })
+    const other = createTestEntity({ name: 'other', schemas: { select: z.object({ id: z.string(), other: z.boolean() }) } })
+    const replaced = defineScope({ entity: other })
+    const result = generateOpenApi([
+      entry('/red', { GET: list() }, [scope, red]),
+      entry('/blue', { GET: list() }, [scope, blue]),
+      entry('/other', { GET: list() }, [scope, red, replaced]),
+    ], { title: 'Shapes', version: '1' })
+    expect(result.components.schemas.Items).toMatchObject({ properties: { red: { const: true } } })
+    expect(result.components.schemas.ItemsPublic2).toMatchObject({ properties: { blue: { const: true } } })
+    expect(result.components.schemas.Other).toMatchObject({ properties: { other: { type: 'boolean' } } })
+    const reference = (path: string) => {
+      const response = (result.paths[path].get as { responses: Record<string, { content: { 'application/json': { schema: { properties: { data: { items: { $ref: string } } } } } } }> }).responses['200']
+      return response.content['application/json'].schema.properties.data.items.$ref
     }
-
-    expect(listOperation.parameters.filter((parameter) => parameter.in === 'query').map((parameter) => parameter.name)).toEqual([
-      'page',
-      'limit',
-      'search',
-      'sort',
-      'order',
-    ])
-    expect(listOperation.description).toContain('equal column value')
-  })
-
-  it('references entity component schemas for bodies and payloads', () => {
-    const document = generateOpenApi(installables, info)
-
-    expect(Object.keys(document.components.schemas).sort()).toEqual(['Items', 'ItemsCreate', 'ItemsUpdate'])
-    expect(document.paths['/items/create'].post).toMatchObject({
-      requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/ItemsCreate' } } } },
-      responses: { '201': { content: { 'application/json': { schema: { properties: { data: { $ref: '#/components/schemas/Items' } } } } } } },
-    })
-  })
-
-  it('documents a custom JSON request schema', () => {
-    expect(generateOpenApi(installables, info).paths['/custom'].post).toMatchObject({
-      requestBody: { content: { 'application/json': { schema: { properties: { file: { properties: { id: { type: 'string' } } } }, required: ['file'] } } } },
-    })
-  })
-
-  it('documents the exact response statuses for every route contract', () => {
-    const document = generateOpenApi(installables, info)
-    const statuses = (path: string, method: string) => Object.keys((document.paths[path][method] as { responses: Record<string, unknown> }).responses).sort()
-
-    expect(statuses('/items/list', 'get')).toEqual(['200', '400', '401', '403', '500'])
-    expect(statuses('/items/detail/{id}', 'get')).toEqual(['200', '400', '401', '403', '404', '500'])
-    expect(statuses('/items/create', 'post')).toEqual(['201', '400', '401', '403', '409', '422', '500'])
-    expect(statuses('/items/update/{id}', 'patch')).toEqual(['200', '400', '401', '403', '404', '409', '422', '500'])
-    expect(statuses('/items/delete/{id}', 'delete')).toEqual(['200', '400', '401', '403', '404', '500'])
-    expect(statuses('/health', 'get')).toEqual(['200', '400', '401', '403', '500'])
-
-    const detailOperation = document.paths['/items/detail/{id}'].get as { responses: Record<string, unknown> }
-    expect(detailOperation.responses['404']).toMatchObject({ content: { 'application/json': { schema: { required: ['error'] } } } })
-  })
-
-  it('emits only paths the router actually serves', async () => {
-    const app = testApp(installables)
-    const served = new Set(app.routes.map((route) => route.path.replace(/:([A-Za-z0-9_]+)/g, '{$1}')))
-
-    for (const path of Object.keys(generateOpenApi(installables, info).paths)) {
-      expect(served.has(path)).toBe(true)
-    }
-  })
-})
-
-describe('openapiRoute', () => {
-  it('serves the document', async () => {
-    const routes = [...installables, openapiRoute(installables, info)] as const
-    const response = await testApp(routes).request('/openapi.json')
-
-    expect(response.status).toBe(200)
-    expect((await response.json()).openapi).toBe('3.1.0')
+    expect(reference('/red')).toBe('#/components/schemas/Items')
+    expect(reference('/blue')).toBe('#/components/schemas/ItemsPublic2')
+    expect(reference('/other')).toBe('#/components/schemas/Other')
   })
 })

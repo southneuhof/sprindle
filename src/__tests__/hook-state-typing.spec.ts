@@ -1,5 +1,6 @@
+import { defineFileModelFixture } from '../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
-import { createEntity, defineModel } from '../model'
+import { createEntity } from '../model'
 import { create, deleteRoute, detail, list, update } from '../routes'
 import { createMemorySource } from '../testing'
 import type { DomainEntity, RouteAuthorize } from '../model'
@@ -64,7 +65,7 @@ describe('factory hook state typing', () => {
   }
 
   it('gives list hooks a typed query/where state', async () => {
-    const model = defineModel({
+    const model = defineFileModelFixture({
       path: '/items',
       entity: makeEntity(),
       routes: {
@@ -79,6 +80,6 @@ describe('factory hook state typing', () => {
         }),
       },
     })
-    expect(model.path).toBe('/items')
+    expect(model[0].httpPath).toBe('/items/list')
   })
 })

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod/v4'
-import { installSprindle, type SprindleInstallOptions, type SprindleInstallable } from '../hono'
+import { installSprindle, type FileRouteManifest, type SprindleInstallOptions } from '../hono'
 import { createMemorySource } from './memory-source'
 import type { ModelRuntimeEntity } from '../source'
 
@@ -31,8 +31,8 @@ export function createTestEntity<TRecord extends Record<string, unknown> = Recor
 }
 
 /** `installSprindle` on a fresh Hono app — go straight to `app.request(...)`. */
-export function testApp<const TInstallables extends readonly SprindleInstallable[]>(
-  installables: TInstallables,
+export function testApp(
+  installables: FileRouteManifest,
   options?: SprindleInstallOptions,
 ) {
   return installSprindle(new Hono(), installables as never, options)

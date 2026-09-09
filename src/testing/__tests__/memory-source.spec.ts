@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { list } from '../../routes'
-import { defineModel } from '../../model'
+import { defineScope, list } from '../../routes'
 import { createMemorySource } from '../memory-source'
 import { createTestEntity, testApp } from '../test-entity'
 
@@ -106,8 +105,10 @@ describe('createMemorySource', () => {
 
 describe('testApp', () => {
   it('serves a model built from a test entity', async () => {
-    const model = defineModel({ path: '/items', entity: createTestEntity(), routes: { list: list() } })
-    const response = await testApp([model] as const).request('/items/list')
+    const entity = createTestEntity()
+    const route = list()
+    const scope = defineScope({ entity })
+    const response = await testApp([{ sourcePath: 'items/list/+server.ts', httpPath: '/items/list', parameters: [], methods: ['GET'], scopes: [scope], handlers: { GET: route } }]).request('/items/list')
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ data: [], page: 1, limit: 20, total: 0 })

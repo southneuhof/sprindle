@@ -1,8 +1,9 @@
+import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../../testing/file-manifest'
 import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
-import { defineRoute } from '../define-route'
+
 import { created } from '../index'
-import { defineModel } from '../../model'
+
 import { sprindleNotFound, sprindleOnError } from '../../hono'
 import { notFound, validationError } from '../../errors'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
@@ -30,33 +31,33 @@ const source: ModelSource<{ id: string }> = {
 const itemEntity = { name: 'items', source } as ModelRuntimeEntity
 
 function buildApp() {
-  const model = defineModel({
-    path: '/items',
+  const model = defineFileModelFixture({
+    path: '',
     entity: itemEntity,
     routes: {
-      missing: defineRoute({
+      missing: testDefineRoute({
         method: 'get',
         action: () => {
           throw notFound('Item is gone.')
         },
       }),
-      made: defineRoute({
+      made: testDefineRoute({
         method: 'post',
         action: (args) => created(args.c, { id: 'item-1' }),
       }),
-      invalid: defineRoute({
+      invalid: testDefineRoute({
         method: 'get',
         action: () => {
           throw validationError([{ field: 'name', message: 'Name is required.' }])
         },
       }),
-      broken: defineRoute({
+      broken: testDefineRoute({
         method: 'get',
         action: () => {
           throw new Error('database password is hunter2')
         },
       }),
-      handled: defineRoute({
+      handled: testDefineRoute({
         method: 'get',
         error: [({ c }) => c.json({ error: 'handled' }, 409)],
         action: () => {
@@ -66,7 +67,7 @@ function buildApp() {
     },
   })
 
-  return new Hono().onError(sprindleOnError).notFound(sprindleNotFound).route('/', model.route)
+  return testInstallSprindle(new Hono().onError(sprindleOnError).notFound(sprindleNotFound), model)
 }
 
 describe('error contract', () => {

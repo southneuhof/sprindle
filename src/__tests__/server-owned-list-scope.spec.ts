@@ -1,3 +1,4 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 // Server-owned read scope: a model-level `before` hook fills `state.where` on list
 // routes; the factory forwards it and the source ANDs it after its own query plan,
 // so a client-supplied conflicting filter cannot widen the visible rows.
@@ -5,9 +6,9 @@ import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, text } from 'drizzle-orm/pg-core'
 import { z } from 'zod/v4'
-import { createEntity, defineModel } from '../model'
+import { createEntity } from '../model'
 import { authenticated, list } from '../routes'
-import { installSprindle, requestContext, sprindleOnError } from '../hono'
+import { requestContext, sprindleOnError } from '../hono'
 import { createMemorySource } from '../testing'
 
 const scopedItems = pgTable('scoped_items', {
@@ -34,10 +35,10 @@ source.rows.push(
 
 scopedItemEntity.source = source as never
 
-const app = installSprindle(
+const app = testInstallSprindle(
   new Hono().onError(sprindleOnError).use('*', requestContext()),
   [
-    defineModel({
+    defineFileModelFixture({
       path: '/scoped-items',
       entity: scopedItemEntity,
       authorize: [authenticated()],

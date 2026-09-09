@@ -1,11 +1,12 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 // Keep in sync with README.md — this spec is the README example, compiled and run.
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, text } from 'drizzle-orm/pg-core'
 import { z } from 'zod/v4'
-import { createEntity, defineModel } from '../model'
+import { createEntity } from '../model'
 import { authenticated, create, detail, list, update } from '../routes'
-import { installSprindle, requestContext, sprindleNotFound, sprindleOnError } from '../hono'
+import { requestContext, sprindleNotFound, sprindleOnError } from '../hono'
 import { createMemorySource } from '../testing'
 
 export const items = pgTable('items', {
@@ -25,7 +26,7 @@ export const item = createEntity({
 // The README binds a real database; the example runs here against the memory source.
 item.source = createMemorySource<{ id: string; name: string }>() as never
 
-export const itemModel = defineModel({
+export const itemModel = defineFileModelFixture({
   path: '/items',
   entity: item,
   enrich: {
@@ -38,7 +39,7 @@ export const itemModel = defineModel({
 
 const resolveSession = () => ({ id: 'user-1' })
 
-export const app = installSprindle(
+export const app = testInstallSprindle(
   new Hono().onError(sprindleOnError).notFound(sprindleNotFound).use('*', requestContext()),
   [itemModel] as const,
   { identity: () => resolveSession() },

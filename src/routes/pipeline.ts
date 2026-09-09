@@ -1,6 +1,6 @@
 import { toHttpError } from '../errors'
 import type { RouteAuthorizeArgs, RouteErrorArgs, RouteHandlerArgs, RoutePipeline, ValidationIssue } from '../model/route-types'
-import type { RouteActionResult } from './define-route'
+type RouteActionResult = Response | object
 
 export type DataWriteStage<TArgs extends RouteHandlerArgs = RouteHandlerArgs> = (args: TArgs) => void | Promise<void>
 
@@ -56,14 +56,14 @@ function list<T>(value: T | T[] | undefined): T[] {
   return Array.isArray(value) ? value : [value]
 }
 
-async function runBefore<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline: RoutePipeline<TArgs> | undefined) {
+export async function runBefore<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline: RoutePipeline<TArgs> | undefined) {
   for (const hook of list(pipeline?.before)) {
     const patch = await hook(args)
     if (patch) Object.assign(args.state, patch)
   }
 }
 
-async function runAuthorize<TArgs extends RouteHandlerArgs>(args: RouteAuthorizeArgs<TArgs>, pipeline: RoutePipeline<TArgs> | undefined) {
+export async function runAuthorize<TArgs extends RouteHandlerArgs>(args: RouteAuthorizeArgs<TArgs>, pipeline: RoutePipeline<TArgs> | undefined) {
   for (const hook of list(pipeline?.authorize)) {
     const result = await hook(args)
     if (result instanceof Response) return result
@@ -72,7 +72,7 @@ async function runAuthorize<TArgs extends RouteHandlerArgs>(args: RouteAuthorize
   return undefined
 }
 
-async function runValidate<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline: RoutePipeline<TArgs> | undefined) {
+export async function runValidate<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline: RoutePipeline<TArgs> | undefined) {
   for (const hook of list(pipeline?.validate)) {
     const result = await hook(args)
     if (result) return args.c.json({ error: 'validation_error', issues: normalizeIssues(result) }, 400)
@@ -80,13 +80,13 @@ async function runValidate<TArgs extends RouteHandlerArgs>(args: TArgs, pipeline
   return undefined
 }
 
-async function runAfter<TArgs extends RouteHandlerArgs>(args: TArgs, response: Response, pipeline: RoutePipeline<TArgs> | undefined) {
+export async function runAfter<TArgs extends RouteHandlerArgs>(args: TArgs, response: Response, pipeline: RoutePipeline<TArgs> | undefined) {
   let next = response
   for (const hook of list(pipeline?.after)) next = (await hook({ ...args, response: next })) ?? next
   return next
 }
 
-async function runError<TArgs extends RouteHandlerArgs>(args: RouteErrorArgs<TArgs>, pipeline: RoutePipeline<TArgs> | undefined) {
+export async function runError<TArgs extends RouteHandlerArgs>(args: RouteErrorArgs<TArgs>, pipeline: RoutePipeline<TArgs> | undefined) {
   for (const hook of list(pipeline?.error)) {
     const response = await hook(args)
     if (response) return response

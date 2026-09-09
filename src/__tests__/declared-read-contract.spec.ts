@@ -1,9 +1,10 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod/v4'
 import { validationError } from '../errors'
-import { installSprindle, requestContext, sprindleOnError } from '../hono'
-import { defineModel } from '../model'
+import { requestContext, sprindleOnError } from '../hono'
+
 import { authenticated, list } from '../routes'
 import { createMemorySource } from '../testing'
 import { createTestEntity } from '../testing/test-entity'
@@ -46,10 +47,10 @@ const entity = createTestEntity<Report>({
 })
 entity.source = source as never
 
-const app = installSprindle(
+const app = testInstallSprindle(
   new Hono().onError(sprindleOnError).use('*', requestContext()),
   [
-    defineModel({
+    defineFileModelFixture({
       path: '/read-contract-reports',
       entity,
       authorize: [authenticated()],

@@ -1,0 +1,13 @@
+{
+  "name": "sprindle-language",
+  "displayName": "Sprindle Language Support",
+  "publisher": "southneuhof",
+  "version": "0.0.0",
+  "private": true,
+  "engines": { "vscode": "^1.136.0" },
+  "activationEvents": ["*"],
+  "main": "./extension.cjs",
+  "contributes": {
+    "languages": [{ "id": "sprindle-typescript", "aliases": ["Sprindle TypeScript"] }]
+  }
+}

@@ -1,7 +1,8 @@
+import { defineFileModelFixture } from '../../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
 import { list } from '../list'
 import { sprindleOnError } from '../../hono'
-import { defineModel } from '../../model'
+
 import { createTestEntity, testApp } from '../../testing'
 
 type Item = { id: string; name: string; categoryCode: string }
@@ -13,7 +14,7 @@ const seed: Item[] = [
 
 const buildApp = (listConfig: Parameters<typeof list>[0], observed: Record<string, unknown> = {}) => {
   const entity = createTestEntity<Item>({ name: 'policy-items', rows: seed })
-  const model = defineModel({
+  const model = defineFileModelFixture({
     path: '/policy-items',
     entity,
     routes: {
@@ -26,7 +27,7 @@ const buildApp = (listConfig: Parameters<typeof list>[0], observed: Record<strin
       }),
     },
   })
-  return testApp([model] as const).onError(sprindleOnError)
+  return testApp(model).onError(sprindleOnError)
 }
 
 describe('list query policy', () => {

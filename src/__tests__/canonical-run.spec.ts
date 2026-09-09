@@ -1,9 +1,10 @@
+import { defineFileModelFixture, testInstallSprindle } from '../testing/file-manifest'
 import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { z } from 'zod/v4'
-import { createEntity, defineModel } from '../model'
+import { createEntity } from '../model'
 import { create, deleteRoute, list, update } from '../routes'
-import { installSprindle, sprindleOnError } from '../hono'
+import { sprindleOnError } from '../hono'
 import { createMemorySource } from '../testing'
 
 const entity = createEntity({
@@ -25,7 +26,7 @@ const updateRun = vi.fn(async (args: { state: { id: string; input: Record<string
 })
 const deleteRun = vi.fn(async () => undefined)
 
-const model = defineModel({
+const model = defineFileModelFixture({
   path: '/canonical-run-items',
   entity,
   routes: {
@@ -36,7 +37,7 @@ const model = defineModel({
   },
 })
 
-const app = installSprindle(new Hono().onError(sprindleOnError), [model] as const)
+const app = testInstallSprindle(new Hono().onError(sprindleOnError), [model] as const)
 
 describe('canonical constructor run seams', () => {
   it('keeps canonical list, create, and update wire contracts', async () => {

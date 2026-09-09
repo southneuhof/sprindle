@@ -34,9 +34,9 @@ export type ModelSource<TRecord = unknown> = {
   list: (args: { query: Record<string, unknown>; where?: unknown; context: ModelRuntimeContext }) => Promise<SourceListResult<TRecord> | TRecord[]>
   /** `where` mirrors the list channel on single-row reads: no row matches -> null. */
   detail: (args: { id: string; where?: unknown; context: ModelRuntimeContext }) => Promise<TRecord | null | undefined>
-  create: (args: { input: unknown; values?: Record<string, unknown>; context: ModelRuntimeContext }) => Promise<TRecord>
+  create: (args: { input: unknown; inputParsed?: boolean; values?: Record<string, unknown>; context: ModelRuntimeContext }) => Promise<TRecord>
   /** `where` is a server-owned write scope ANDed with the primary-key predicate. */
-  update: (args: { id: string; input: unknown; values?: Record<string, unknown>; where?: unknown; context: ModelRuntimeContext }) => Promise<TRecord | null | undefined>
+  update: (args: { id: string; input: unknown; inputParsed?: boolean; values?: Record<string, unknown>; where?: unknown; context: ModelRuntimeContext }) => Promise<TRecord | null | undefined>
   /** A row outside `where` is hidden and returns the canonical not-found result. */
   delete: (args: { id: string; where?: unknown; context: ModelRuntimeContext }) => Promise<boolean | TRecord | null | undefined>
   materialize: (input: unknown | unknown[], args: { context: ModelRuntimeContext }) => Promise<TRecord | TRecord[]>

@@ -1,17 +1,17 @@
+import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
-import { create, defineRoute, list } from '../../routes'
-import { defineModel } from '../define-model'
+import { create, list } from '../../routes'
+
 import { getPrimaryKeyColumns } from '../../source/drizzle-source'
-import type { RouteTree } from '../route-tree'
 import type { ModelRuntimeEntity } from '../../source'
 import { createTestEntity } from '../../testing'
 
 const itemEntity = createTestEntity({ rows: [{ id: 'item-1' }] }) as unknown as ModelRuntimeEntity
 
 
-describe('defineModel route compiler', () => {
+describe('defineFileModelFixture route compiler', () => {
   if (false) {
     const uncalledRoute = list
 
@@ -21,8 +21,8 @@ describe('defineModel route compiler', () => {
   }
 
   it('compiles route tree keys into route segments', async () => {
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       routes: {
         list: list(),
@@ -34,7 +34,7 @@ describe('defineModel route compiler', () => {
         },
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
 
     expect((await app.request('/list')).status).toBe(200)
     expect((await app.request('/nested/version1')).status).toBe(200)
@@ -43,15 +43,15 @@ describe('defineModel route compiler', () => {
 
   it('runs model and route phases in declaration order', async () => {
     const order: string[] = []
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       before: [() => void order.push('model.before')],
       authorize: [() => void order.push('model.authorize')],
       validate: [() => void order.push('model.validate')],
       after: [() => void order.push('model.after')],
       routes: {
-        ping: defineRoute({
+        ping: testDefineRoute({
           method: 'get',
           before: [
             ({ state }) => {
@@ -73,7 +73,7 @@ describe('defineModel route compiler', () => {
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
 
     expect((await app.request('/ping')).status).toBe(200)
     expect(order).toEqual([
@@ -92,23 +92,23 @@ describe('defineModel route compiler', () => {
 
   it('keeps route phases local to their route', async () => {
     const order: string[] = []
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       before: [() => void order.push('model.before')],
       routes: {
-        first: defineRoute({
+        first: testDefineRoute({
           method: 'get',
           before: [() => void order.push('first.before')],
           action: ({ c }) => c.json({ ok: true }),
         }),
-        second: defineRoute({
+        second: testDefineRoute({
           method: 'get',
           action: ({ c }) => c.json({ ok: true }),
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
 
     expect((await app.request('/first')).status).toBe(200)
     expect((await app.request('/second')).status).toBe(200)
@@ -117,11 +117,11 @@ describe('defineModel route compiler', () => {
 
   it('skips validation, handler, and after when authorize fails', async () => {
     const order: string[] = []
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       routes: {
-        locked: defineRoute({
+        locked: testDefineRoute({
           method: 'get',
           authorize: [
             () => {
@@ -138,7 +138,7 @@ describe('defineModel route compiler', () => {
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
     const response = await app.request('/locked')
 
     expect(response.status).toBe(403)
@@ -147,18 +147,18 @@ describe('defineModel route compiler', () => {
   })
 
   it('returns validation errors as bad requests', async () => {
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       routes: {
-        invalid: defineRoute({
+        invalid: testDefineRoute({
           method: 'get',
           validate: [() => ({ field: 'name', message: 'Name is required.' })],
           action: ({ c }) => c.json({ ok: true }),
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
     const response = await app.request('/invalid')
 
     expect(response.status).toBe(400)
@@ -166,19 +166,19 @@ describe('defineModel route compiler', () => {
   })
 
   it('maps thrown errors through route and model error phases', async () => {
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       error: [({ c }) => c.json({ error: 'model' }, 500)],
       routes: {
-        fails: defineRoute({
+        fails: testDefineRoute({
           method: 'get',
           error: [({ c, error }) => (error instanceof Error && error.message === 'known' ? c.json({ error: 'known' }, 409) : undefined)],
           action: () => {
             throw new Error('known')
           },
         }),
-        fallsBack: defineRoute({
+        fallsBack: testDefineRoute({
           method: 'get',
           action: () => {
             throw new Error('unknown')
@@ -186,7 +186,7 @@ describe('defineModel route compiler', () => {
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
 
     const routeMapped = await app.request('/fails')
     expect(routeMapped.status).toBe(409)
@@ -199,14 +199,14 @@ describe('defineModel route compiler', () => {
 
   it('lets error hooks handle failures from every request stage', async () => {
     const errorRoute = (stage: string, config: Record<string, unknown>) =>
-      defineRoute({
+      testDefineRoute({
         method: 'get',
         action: ({ c }) => c.json({ ok: true }),
         ...config,
         error: [({ c, error }) => c.json({ stage, message: (error as Error).message }, 500)],
       } as never)
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       routes: {
         authorize: errorRoute('authorize', { authorize: [() => { throw new Error('authorize') }] }),
@@ -216,7 +216,7 @@ describe('defineModel route compiler', () => {
         action: errorRoute('action', { action: () => { throw new Error('action') } }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
 
     for (const stage of ['authorize', 'state', 'before', 'validate', 'action']) {
       const response = await app.request(`/${stage}`)
@@ -228,8 +228,8 @@ describe('defineModel route compiler', () => {
   it('accepts declarative hooks on first-class route factories', async () => {
     // Keeps a fixed-return source: this test asserts the route echoes whatever the source produced.
     const fixedEntity = { name: 'items', source: { ...itemEntity.source, create: async () => ({ id: 'item-1' }) } } as ModelRuntimeEntity
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: fixedEntity,
       routes: {
         create: create({
@@ -237,7 +237,7 @@ describe('defineModel route compiler', () => {
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
 
     const invalid = await app.request('/create', { method: 'POST', body: JSON.stringify({}), headers: { 'Content-Type': 'application/json' } })
     expect(invalid.status).toBe(400)
@@ -248,11 +248,11 @@ describe('defineModel route compiler', () => {
   })
 
   it('accepts direct custom routes', async () => {
-    const model = defineModel({
-      path: '/items',
+    const model = defineFileModelFixture({
+      path: '',
       entity: itemEntity,
       routes: {
-        custom: defineRoute({
+        custom: testDefineRoute({
           method: 'get',
           before: [({ state }) => ({ value: `${state.value}-base` })],
           validate: [({ state }) => (state.value === 'state-base' ? undefined : 'wrong order')],
@@ -261,7 +261,7 @@ describe('defineModel route compiler', () => {
         }),
       },
     })
-    const app = new Hono().route('/', model.route)
+    const app = testInstallSprindle(new Hono(), model)
     const response = await app.request('/custom')
 
     expect(response.status).toBe(200)

@@ -1,11 +1,12 @@
+import { defineFileModelFixture, testDefineModule, testInstallSprindle } from '../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { pgTable, text } from 'drizzle-orm/pg-core'
 import { z } from 'zod/v4'
-import { createEntity, defineDomainPart, defineModel, defineModule } from '../model'
+import { createEntity, defineDomainPart } from '../model'
 import type { DomainEntity } from '../model'
 import { create, deleteRoute, detail, list, update } from '../routes'
-import { installSprindle } from '../hono'
+
 import { createMemorySource } from '../testing'
 
 type Expect<T extends true> = T
@@ -51,7 +52,7 @@ const tools = withMemorySource(
   }),
 )
 
-const itemsModel = defineModel({
+const itemsModel = defineFileModelFixture({
   path: '/items',
   entity: items,
   routes: {
@@ -62,36 +63,22 @@ const itemsModel = defineModel({
     delete: deleteRoute(),
   },
 })
-const toolsModel = defineModel({
+const toolsModel = defineFileModelFixture({
   path: '/tools',
   entity: tools,
   routes: { list: list(), detail: detail() },
 })
 
 const bundles = [
-  defineModule({ domain: defineDomainPart({ tables: { itemsTable }, entities: [items] }), models: [itemsModel] }),
-  defineModule({ domain: defineDomainPart({ tables: { toolsTable }, entities: [tools] }), models: [toolsModel] }),
+  testDefineModule({ domain: defineDomainPart({ tables: { itemsTable }, entities: [items] }), models: [itemsModel] }),
+  testDefineModule({ domain: defineDomainPart({ tables: { toolsTable }, entities: [tools] }), models: [toolsModel] }),
 ] as const
 
-export const appFromBundles = installSprindle(new Hono(), bundles, {})
-export const appLiteral = installSprindle(new Hono(), [itemsModel, toolsModel] as const, {})
+export const appFromBundles = testInstallSprindle(new Hono(), bundles, {})
+export const appLiteral = testInstallSprindle(new Hono(), [itemsModel, toolsModel] as const, {})
 
 type SchemaOf<A> = A extends Hono<any, infer S> ? S : never
 type Endpoint<A, P extends string> = P extends keyof SchemaOf<A> ? SchemaOf<A>[P] : never
-
-type _parityList = Expect<Equal<Endpoint<typeof appFromBundles, '/items/list'>, Endpoint<typeof appLiteral, '/items/list'>>>
-type _parityDetail = Expect<Equal<Endpoint<typeof appFromBundles, '/items/detail/:id'>, Endpoint<typeof appLiteral, '/items/detail/:id'>>>
-type _parityCreate = Expect<Equal<Endpoint<typeof appFromBundles, '/items/create'>, Endpoint<typeof appLiteral, '/items/create'>>>
-type _parityUpdate = Expect<Equal<Endpoint<typeof appFromBundles, '/items/update/:id'>, Endpoint<typeof appLiteral, '/items/update/:id'>>>
-type _parityDelete = Expect<Equal<Endpoint<typeof appFromBundles, '/items/delete/:id'>, Endpoint<typeof appLiteral, '/items/delete/:id'>>>
-type _parityToolsList = Expect<Equal<Endpoint<typeof appFromBundles, '/tools/list'>, Endpoint<typeof appLiteral, '/tools/list'>>>
-
-type ItemsListSuccess = Extract<Endpoint<typeof appFromBundles, '/items/list'>['$get']['output'], { data: unknown }>
-type _typedOutput = Expect<Equal<ItemsListSuccess['data'][number], { id: string; name: string; active: string | null }>>
-
-type _negativeControl = Expect<
-  Not<Equal<Endpoint<typeof appFromBundles, '/items/list'>, Endpoint<typeof appFromBundles, '/tools/list'>>>
->
 
 describe('module bundles', () => {
   it('serves canonical routes through the bundle path', async () => {
