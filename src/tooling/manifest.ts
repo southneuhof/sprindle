@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { watch } from 'node:fs'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
@@ -13,6 +13,24 @@ import { readRouteDirectory } from './route-files.ts'
 import { routeLanguageOverlay } from './language.ts'
 
 const dependencyInputs = new Map<string, string[]>()
+
+function rejectStaticCycles(projectRoot: string, inputs: Record<string, { imports: { path: string; kind: string; external?: boolean }[] }>) {
+  const graph = new Map(Object.entries(inputs).map(([file, input]) => [file, input.imports.filter((entry) => entry.kind === 'import-statement' && !entry.external && inputs[entry.path]).map((entry) => entry.path).sort()]))
+  const visited = new Set<string>(), active = new Map<string, number>(), path: string[] = []
+  const shown = (file: string) => relative(realpathSync(projectRoot), isAbsolute(file) ? file : existsSync(resolve(file)) ? resolve(file) : resolve(projectRoot, file)).replaceAll(sep, '/')
+  const visit = (file: string): string[] | undefined => {
+    const start = active.get(file)
+    if (start !== undefined) return [...path.slice(start), file]
+    if (visited.has(file)) return
+    visited.add(file); active.set(file, path.length); path.push(file)
+    for (const dependency of graph.get(file) ?? []) { const cycle = visit(dependency); if (cycle) return cycle }
+    path.pop(); active.delete(file)
+  }
+  for (const file of [...graph.keys()].sort()) {
+    const cycle = visit(file)
+    if (cycle) throw new Error(`Static local import cycle: ${cycle.map(shown).join(' -> ')}. Move shared declarations into a module that does not import the service.`)
+  }
+}
 
 async function configInputs(configFile: string, seen = new Set<string>()): Promise<string[]> {
   const file = resolve(configFile)
@@ -42,6 +60,7 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   const bundled = Object.keys(analysis.metafile.inputs).filter((file) => !file.endsWith('sprindle-routes.ts') && file !== '<stdin>').map((file) => isAbsolute(file) ? file : existsSync(resolve(file)) ? resolve(file) : resolve(projectRoot, file))
   const inputs = [...new Set([...bundled, ...(await configInputs(resolve(projectRoot, 'tsconfig.json')))])].sort()
   dependencyInputs.set(resolve(projectRoot), inputs)
+  rejectStaticCycles(projectRoot, analysis.metafile.inputs)
   const contents = await Promise.all(inputs.map((file) => readFile(file, 'utf8')))
   const hash = createHash('sha256').update(JSON.stringify([portable, inputs, contents])).digest('hex')
   try {
@@ -64,14 +83,17 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
   const overlay = routeLanguageOverlay(projectRoot, routesDirectory, new Map(), virtualDefinition)
   overlay.set(virtualDefinition, readFileSync(definitionSource, 'utf8'))
   for (const [file, source] of overlay) if (/\.[rs]\.d\.ts$/.test(file)) overlay.set(file, source.replace(/^export \* from .*$/m, `export * from '@southneuhof/sprindle'`))
+  const commonSourceRoot = commonPath(projectRoot, [...overlay.keys()])
+  const mappedPath = (file: string) => containedRelativePath(commonSourceRoot, file)
   const input = mkdtempSync(resolve(tmpdir(), `sprindle-contract-input-${process.pid}-`))
+  const stagedProject = resolve(input, mappedPath(projectRoot))
   const temporary = resolve(projectRoot, `.sprindle-contract-${process.pid}-${randomUUID()}`)
   let declarationTemporary: string | undefined
   try {
     for (const [file, source] of overlay) {
-      const path = relative(projectRoot, file)
-      if (path.startsWith('..') || path === 'tsconfig.json') continue
-      const output = resolve(input, path); mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, source)
+      const output = resolve(input, mappedPath(file))
+      if (output === resolve(stagedProject, 'tsconfig.json')) continue
+      mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, source)
     }
     mkdirSync(resolve(input, 'node_modules'), { recursive: true })
     const frameworkModules = resolve(frameworkRoot, 'node_modules')
@@ -89,30 +111,35 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
     const options = { ...effective.compilerOptions }
     const originalBase = resolve(projectRoot, typeof options.baseUrl === 'string' ? options.baseUrl : '.')
     const paths = options.paths as Record<string, string[]> | undefined
-    if (paths) options.paths = Object.fromEntries(Object.entries(paths).map(([name, targets]) => [name, targets.map((target) => './' + relative(projectRoot, resolve(originalBase, target)).replaceAll(sep, '/'))]))
+    if (paths) options.paths = Object.fromEntries(Object.entries(paths).map(([name, targets]) => [name, targets.map((target) => {
+      const path = relative(stagedProject, resolve(input, mappedPath(resolve(originalBase, target)))).replaceAll(sep, '/')
+      return path.startsWith('.') ? path : `./${path}`
+    })]))
     delete options.baseUrl
     Object.assign(options, { rootDir: input, outDir: temporary, declaration: true, emitDeclarationOnly: true, declarationMap: false, noEmit: false, composite: false, incremental: false, allowImportingTsExtensions: false, skipLibCheck: true })
     delete options.tsBuildInfoFile
     const contextualSources = [...overlay.keys()].filter((file) => file.endsWith('.ts') && !file.endsWith('.d.ts') && file !== resolve(projectRoot, 'tsconfig.json'))
-    const rootFiles = [...new Set([...routes.flatMap((route) => [route.sourcePath, ...route.scopes]), ...contextualSources, virtualDefinition])].map((file) => resolve(input, relative(projectRoot, file)))
-    writeFileSync(resolve(input, 'tsconfig.json'), JSON.stringify({ compilerOptions: options, files: rootFiles }))
-    const emitted = spawnSync(process.execPath, [compiler, '-p', resolve(input, 'tsconfig.json'), '--pretty', 'false'], { cwd: projectRoot, encoding: 'utf8' })
+    const rootFiles = [...new Set([...routes.flatMap((route) => [route.sourcePath, ...route.scopes]), ...contextualSources, virtualDefinition])].map((file) => resolve(input, mappedPath(file)))
+    mkdirSync(stagedProject, { recursive: true })
+    const stagedConfig = resolve(stagedProject, 'tsconfig.json')
+    writeFileSync(stagedConfig, JSON.stringify({ compilerOptions: options, files: rootFiles }))
+    const emitted = spawnSync(process.execPath, [compiler, '-p', stagedConfig, '--pretty', 'false'], { cwd: projectRoot, encoding: 'utf8' })
     if (emitted.error || emitted.status !== 0) throw new Error(`TypeScript declaration emit failed: ${emitted.error?.message ?? emitted.stdout + emitted.stderr}`)
-    for (const [file, source] of overlay) if (/\.[rs]\.d\.ts$/.test(file)) {
-      const output = resolve(temporary, relative(projectRoot, file)); mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, source)
+    for (const [file, source] of overlay) if (file.endsWith('.d.ts')) {
+      const output = resolve(temporary, mappedPath(file)); mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, source)
     }
     for (const file of declarationFiles(temporary)) {
-      const definitionPath = relative(dirname(file), resolve(temporary, '.__sprindle_route_definition')).replaceAll('\\', '/')
+      const definitionPath = relative(dirname(file), resolve(temporary, mappedPath(virtualDefinition)).replace(/\.ts$/, '')).replaceAll('\\', '/')
       const specifier = definitionPath.startsWith('.') ? definitionPath : `./${definitionPath}`
       let source = readFileSync(file, 'utf8').replace(/(["'])[^"']*sprindle-contract-input-[^"']*\/\.__sprindle_route_definition\.js\1/g, JSON.stringify(specifier))
-      source = rewritePathAliases(source, file, temporary, paths, originalBase, projectRoot)
+      source = rewritePathAliases(source, file, temporary, paths, originalBase, commonSourceRoot)
       writeFileSync(file, source)
     }
     const emittedFiles = declarationFiles(temporary).sort()
     const emittedContents = emittedFiles.map((file) => [relative(temporary, file).replaceAll(sep, '/'), readFileSync(file, 'utf8')])
     const version = createHash('sha256').update(JSON.stringify(emittedContents)).digest('hex').slice(0, 24)
     const contract = routes.flatMap((route) => route.methods.map((method) => {
-      const modulePath = `./contracts/${version}/` + relative(projectRoot, route.sourcePath).replaceAll('\\', '/').replace(/\.ts$/, '')
+      const modulePath = `./contracts/${version}/` + mappedPath(route.sourcePath).replaceAll('\\', '/').replace(/\.ts$/, '')
       return `{ path: ${JSON.stringify(route.httpPath)}; method: ${JSON.stringify(method.toLowerCase())}; definition: typeof import(${JSON.stringify(modulePath)})[${JSON.stringify(method)}] }`
     })).join(' | ') || 'never'
     const contractDirectory = resolve(dirname(declaration), 'contracts', version)
@@ -133,6 +160,27 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
   }
 }
 
+function containedRelativePath(root: string, file: string) {
+  const path = relative(root, resolve(file))
+  if (isAbsolute(path) || path.split(sep).includes('..')) throw new Error(`Declaration input is outside ${root}: ${file}`)
+  return path
+}
+
+function commonPath(projectRoot: string, files: string[]) {
+  let root = resolve(projectRoot)
+  for (const file of files) while (containedRelativePathOrUndefined(root, file) === undefined) {
+    const parent = dirname(root)
+    if (parent === root) throw new Error(`Declaration inputs do not have a common path: ${projectRoot}, ${file}`)
+    root = parent
+  }
+  return root
+}
+
+function containedRelativePathOrUndefined(root: string, file: string) {
+  const path = relative(root, resolve(file))
+  return isAbsolute(path) || path.split(sep).includes('..') ? undefined : path
+}
+
 function resolveTypeScriptCompiler(frameworkRoot: string) {
   try {
     const packageFile = createRequire(resolve(frameworkRoot, 'package.json')).resolve('typescript/package.json')
@@ -142,7 +190,7 @@ function resolveTypeScriptCompiler(frameworkRoot: string) {
   } catch (error) { throw new Error(`TypeScript compiler dependency is missing: ${error instanceof Error ? error.message : String(error)}`) }
 }
 
-function rewritePathAliases(source: string, file: string, outputRoot: string, paths: Record<string, string[]> | undefined, originalBase: string, projectRoot: string) {
+function rewritePathAliases(source: string, file: string, outputRoot: string, paths: Record<string, string[]> | undefined, originalBase: string, commonSourceRoot: string) {
   if (!paths) return source
   const edits: { start: number; end: number; value: string }[] = []
   const program = parseTypeScript(source, { sourceType: 'module', plugins: ['typescript'] }).program
@@ -166,8 +214,8 @@ function rewritePathAliases(source: string, file: string, outputRoot: string, pa
       const match = star < 0 ? name === pattern ? '' : undefined : name.startsWith(pattern.slice(0, star)) && name.endsWith(pattern.slice(star + 1)) ? name.slice(star, name.length - (pattern.length - star - 1)) : undefined
       if (match === undefined || !targets[0]) continue
       const target = targets[0].replace('*', match)
-      const projectPath = relative(projectRoot, resolve(originalBase, target)).replaceAll(sep, '/')
-      let specifier = relative(dirname(file), resolve(outputRoot, projectPath)).replaceAll(sep, '/').replace(/\.(?:[cm]?ts|d\.ts)$/, '')
+      const mappedTarget = containedRelativePath(commonSourceRoot, resolve(originalBase, target))
+      let specifier = relative(dirname(file), resolve(outputRoot, mappedTarget)).replaceAll(sep, '/').replace(/\.(?:d\.ts|[cm]?ts)$/, '')
       if (!specifier.startsWith('.')) specifier = `./${specifier}`
       replacement = specifier
       break
@@ -199,7 +247,7 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     }))
     for (const [directory, watcher] of watched) if (!wanted.has(directory)) { watcher.close(); watched.delete(directory) }
   }
-  const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) onResult?.(error) })) }
+  const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) { refreshWatchers(); onResult?.(error) } })) }
   const schedule = () => { if (closed) return; if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = undefined; compile() }, 100) }
   refreshWatchers(); compile(); await queue; compile(); await queue
   return { close: async () => { closed = true; recursiveWatcher.close(); if (timer) { clearTimeout(timer); timer = undefined }; await queue; for (const watcher of watched.values()) watcher.close(); watched.clear() } }

@@ -19,3 +19,18 @@ pnpm --filter @southneuhof/sprindle test:tooling
 pnpm --filter @southneuhof/sprindle test:editor-install
 pnpm --filter @southneuhof/sprindle test:editor
 ```
+
+The manifest compiler rejects static local import cycles in bundle and source
+mode. For example, `auth.ts -> db.ts -> domains.ts -> auth.ts` is an error.
+Move shared declarations to a module that does not import the service. Source
+manifests keep one module identity with direct application source imports and
+need the existing TypeScript loader. Production still uses the shared ESM
+application build. The check uses static import statements. It does not detect
+cycles through dynamic imports or `require` calls.
+
+Routes can use direct relative imports from sibling TypeScript source trees.
+The manifest compiler keeps the selected sibling `.ts` and `.d.ts` files in the
+private consumer contract. The normal build, check, and development commands do
+not change. An alias can refer to a sibling file after a direct relative import
+has found that file. Alias-only sibling discovery, `.mts` and `.cts` declarations,
+and separate dependency versions for sibling trees are not supported.

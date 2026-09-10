@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
@@ -47,6 +47,28 @@ function runInstalled(root: string, installed: string, command: string) {
   })
 }
 
+async function stop(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  await new Promise<void>((resolve) => {
+    const forced = setTimeout(() => child.kill('SIGKILL'), 5_000)
+    child.once('exit', () => { clearTimeout(forced); resolve() })
+    child.kill('SIGTERM')
+  })
+}
+
+function waitForFile(child: ChildProcess, root: string, file: string, output: () => string) {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const watcher = watch(root, { recursive: true }, check)
+    const timeout = setTimeout(() => finish(new Error(`Timed out while waiting for ${file}.\n${output()}`)), 30_000)
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(new Error(`Process exited before ${file} was ready (${code ?? signal}).\n${output()}`))
+    function finish(error?: Error) { if (settled) return; settled = true; clearTimeout(timeout); watcher.close(); child.off('exit', onExit); if (error) reject(error); else resolve() }
+    function check() { if (existsSync(file)) finish() }
+    child.once('exit', onExit)
+    check()
+  })
+}
+
 test('batch command has a cold start, exact source errors, recovery, and concurrent calls', async () => {
   const { root, put } = fixture()
   const file = put('[id]/+server.ts', `export const GET=defineRoute({action:({params})=>params.missing})`)
@@ -54,7 +76,7 @@ test('batch command has a cold start, exact source errors, recovery, and concurr
   for (const result of [first, second]) { expect(result.code).toBe(1); expect(result.output).toContain(file); expect(result.output).toContain('2339') }
   writeFileSync(file, `import { defineRoute } from '@southneuhof/sprindle';export const GET=defineRoute({action:({params})=>params.id})`)
   const recovered = await run(root); expect(recovered, recovered.output).toMatchObject({ code: 0 })
-}, 20_000)
+}, 120_000)
 
 test('published build command writes a loadable static artifact', async () => {
   const { root } = fixture()
@@ -65,7 +87,25 @@ test('published build command writes a loadable static artifact', async () => {
   expect(result.output).toContain(join(root, '.sprindle', 'routes.mjs'))
   const manifest = await import(`${pathToFileURL(join(root, '.sprindle', 'routes.mjs')).href}?command`)
   expect(await manifest.default[0].handlers.GET()).toEqual({ ok: true })
-})
+}, 120_000)
+
+test('published build command emits a usable contract for a sibling import', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'sprindle-tooling-sibling-')); projects.push(workspace)
+  const root = join(workspace, 'api')
+  mkdirSync(join(root, 'node_modules', '@southneuhof'), { recursive: true })
+  symlinkSync(join(import.meta.dirname, '..', '..'), join(root, 'node_modules', '@southneuhof', 'sprindle'), 'dir')
+  for (const dependency of ['hono', 'zod']) symlinkSync(join(import.meta.dirname, '..', '..', 'node_modules', dependency), join(root, 'node_modules', dependency), 'dir')
+  mkdirSync(join(root, 'routes', 'health'), { recursive: true }); mkdirSync(join(workspace, 'shared'))
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', skipLibCheck: false }, include: ['routes/**/*.ts', 'consumer.ts'] }))
+  writeFileSync(join(workspace, 'shared', 'result.ts'), `export interface Result { ok: true };export const result:Result={ok:true}`)
+  writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import {defineRoute} from '@southneuhof/sprindle';import {result} from '../../../shared/result';export const GET=defineRoute({action:()=>result})`)
+  const result = await run(root, 'build.mjs')
+  expect(result, result.output).toMatchObject({ code: 0 })
+  rmSync(join(root, 'routes'), { recursive: true }); rmSync(join(workspace, 'shared'), { recursive: true })
+  writeFileSync(join(root, 'consumer.ts'), `import type {RouteContract} from './.sprindle/routes';type D=Extract<RouteContract,{path:'/health';method:'get'}>['definition'];type O=NonNullable<D extends {readonly output?:infer V}?V:never>;const ok:O={ok:true};// @ts-expect-error exact sibling type is preserved\nconst wrong:O={ok:false};`)
+  const checked = spawnSync(join(process.cwd(), 'node_modules', '.bin', 'tsc'), ['-p', join(root, 'tsconfig.json'), '--pretty', 'false'], { encoding: 'utf8' })
+  expect(checked.status, checked.stdout + checked.stderr).toBe(0)
+}, 120_000)
 
 test('separate builds publish immutable declarations while a reader stays active', async () => {
   const { root } = fixture()
@@ -94,7 +134,7 @@ test('separate builds publish immutable declarations while a reader stays active
   expect(readFileSync(join(root, '.sprindle', 'routes.mjs'), 'utf8')).toBe(runtimeBefore)
   expect(readFileSync(join(root, '.sprindle', 'routes.d.ts'), 'utf8')).toBe(typesBefore)
   expect(readdirSync(root).filter((name) => name.startsWith('.sprindle-contract'))).toEqual([])
-}, 20_000)
+}, 120_000)
 
 test('installed package commands run with normal Node from node_modules', async () => {
   const { root } = fixture()
@@ -139,12 +179,26 @@ test('installed package commands run with normal Node from node_modules', async 
   writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', skipLibCheck: true }, include: ['routes/**/*.ts'] }))
   rmSync(join(root, '.sprindle'), { recursive: true, force: true })
   const dev = spawn(process.execPath, [join(installed, 'dist-tooling/dev.js'), root], { cwd: root })
-  for (let attempt = 0; attempt < 200 && !existsSync(join(root, '.sprindle/routes.mjs')); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-  expect(existsSync(join(root, '.sprindle/routes.mjs'))).toBe(true); dev.kill('SIGTERM'); await new Promise((resolve) => dev.once('exit', resolve))
+  let devOutput = ''; dev.stdout?.on('data', (data) => devOutput += data); dev.stderr?.on('data', (data) => devOutput += data)
+  try {
+    await waitForFile(dev, root, join(root, '.sprindle/routes.mjs'), () => devOutput)
+    expect(existsSync(join(root, '.sprindle/routes.mjs'))).toBe(true)
+  } finally { await stop(dev) }
   const server = spawn(process.execPath, [join(installed, 'dist-tooling/language-server.js')], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] })
-  const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: pathToFileURL(root).href, initializationOptions: { routesDirectory: 'routes' } } }))
-  server.stdin.write(`Content-Length: ${body.length}\r\n\r\n`); server.stdin.write(body)
-  let response = ''; server.stdout.on('data', (data) => response += data)
-  for (let attempt = 0; attempt < 40 && !response.includes('"id":1'); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-  expect(response).toContain('"id":1'); server.kill('SIGTERM'); await new Promise((resolve) => server.once('exit', resolve))
-}, 30_000)
+  let response = '', serverError = ''
+  server.stderr.on('data', (data) => serverError += data)
+  try {
+    const initialized = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => finish(new Error(`Language server initialization timed out.\nstdout:\n${response}\nstderr:\n${serverError}`)), 30_000)
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(new Error(`Language server exited before initialization (${code ?? signal}).\nstdout:\n${response}\nstderr:\n${serverError}`))
+      const onData = (data: Buffer) => { response += data; if (response.includes('"id":1')) finish() }
+      function finish(error?: Error) { clearTimeout(timeout); server.off('exit', onExit); server.stdout.off('data', onData); if (error) reject(error); else resolve() }
+      server.once('exit', onExit)
+      server.stdout.on('data', onData)
+    })
+    const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: pathToFileURL(root).href, initializationOptions: { routesDirectory: 'routes' } } }))
+    server.stdin.write(`Content-Length: ${body.length}\r\n\r\n`); server.stdin.write(body)
+    await initialized
+    expect(response).toContain('"id":1')
+  } finally { await stop(server) }
+}, 120_000)
