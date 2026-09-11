@@ -46,8 +46,9 @@ async function configInputs(configFile: string, seen = new Set<string>()): Promi
   return [file, ...(await Promise.all(parents.map((parent) => configInputs(parent, seen)))).flat()]
 }
 
-export async function compileRouteManifest(projectRoot: string, routesDirectory = 'routes', output = '.sprindle/routes.mjs', bundle = true) {
+export async function compileRouteManifest(projectRoot: string, routesDirectory = 'routes', output = '.sprindle/routes.mjs', bundle = true, options: { declarations?: boolean } = {}) {
   const root = resolve(projectRoot, routesDirectory)
+  const emitDeclarations = options.declarations ?? true
   const model = await readRouteDirectory(root)
   const portable = model.routes.map((route) => ({ ...route, sourcePath: relative(projectRoot, route.sourcePath), scopes: route.scopes.map((scope) => relative(projectRoot, scope)) }))
   const imports: string[] = [], scopeNames = new Map<string, string>()
@@ -66,9 +67,10 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   try {
     if (bundle) await build({ stdin: { contents: source(hash), resolveDir: projectRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, outfile: temporary, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', sourcemap: 'inline' })
     else await writeFile(temporary, source(hash))
-    const publishDeclaration = await emitRouteDeclarations(projectRoot, routesDirectory, model.routes, target.replace(/\.mjs$/, '.d.ts'))
+    const publishDeclaration = emitDeclarations ? await emitRouteDeclarations(projectRoot, routesDirectory, model.routes, target.replace(/\.mjs$/, '.d.ts')) : undefined
     await rename(temporary, target)
-    await publishDeclaration()
+    if (publishDeclaration) await publishDeclaration()
+    else await rm(target.replace(/\.mjs$/, '.d.ts'), { force: true })
   } finally {
     await rm(temporary, { force: true })
   }
@@ -229,7 +231,7 @@ function declarationFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? declarationFiles(resolve(directory, entry.name)) : entry.name.endsWith('.d.ts') ? [resolve(directory, entry.name)] : [])
 }
 
-export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true) {
+export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true, options: { declarations?: boolean } = {}) {
   let queue = Promise.resolve(), timer: ReturnType<typeof setTimeout> | undefined, closed = false
   const project = resolve(projectRoot), watched = new Map<string, ReturnType<typeof watch>>()
   const recursiveWatcher = watch(project, { recursive: true }, (_event, filename) => {
@@ -247,7 +249,7 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     }))
     for (const [directory, watcher] of watched) if (!wanted.has(directory)) { watcher.close(); watched.delete(directory) }
   }
-  const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) { refreshWatchers(); onResult?.(error) } })) }
+  const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle, options).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) { refreshWatchers(); onResult?.(error) } })) }
   const schedule = () => { if (closed) return; if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = undefined; compile() }, 100) }
   refreshWatchers(); compile(); await queue; compile(); await queue
   return { close: async () => { closed = true; recursiveWatcher.close(); if (timer) { clearTimeout(timer); timer = undefined }; await queue; for (const watcher of watched.values()) watcher.close(); watched.clear() } }

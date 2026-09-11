@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -28,6 +28,16 @@ test('writes one atomic artifact with file, helper, and extended config inputs',
   rmSync(join(root, 'helper.ts'))
   const run = spawnSync(process.execPath, ['--input-type=module', '--eval', `const m=await import(${JSON.stringify(pathToFileURL(first).href)});process.stdout.write(m.default[0].handlers.POST())`], { encoding: 'utf8' })
   expect(run.stderr).toBe(''); expect(run.stdout).toBe('changed')
+})
+
+test('skips declarations when disabled', async () => {
+  const root = fixture()
+  const target = await compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', true, { declarations: false })
+  const manifest = await import(`${pathToFileURL(target).href}?skipped`)
+  expect(manifest.default).toHaveLength(1)
+  expect(existsSync(target.replace(/\.mjs$/, '.d.ts'))).toBe(false)
+  await compileRouteManifest(root)
+  expect(existsSync(target.replace(/\.mjs$/, '.d.ts'))).toBe(true)
 })
 
 test('watch recovers after an invalid source tree is fixed', { timeout: 120_000 }, async () => {
