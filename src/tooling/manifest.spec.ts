@@ -40,6 +40,13 @@ test('skips declarations when disabled', async () => {
   expect(existsSync(target.replace(/\.mjs$/, '.d.ts'))).toBe(true)
 })
 
+test('watcher startup compiles exactly once', { timeout: 120_000 }, async () => {
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  await watcher.close()
+  expect(callbacks).toHaveLength(1)
+})
+
 test('watch recovers after an invalid source tree is fixed', { timeout: 120_000 }, async () => {
   const root = fixture(); const errors: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => errors.push(error))
@@ -125,6 +132,7 @@ test('watch recovers when an external cycle is fixed by an external edit', { tim
   const watcher = await watchRouteManifest(root, 'routes', (error) => results.push(error))
   try {
     expect(results.at(-1)).toBeInstanceOf(Error)
+    for (let attempt = 0; attempt < 40 && results.length < 2; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
     const count = results.length
     writeFileSync(join(base, 'shared', 'b.ts'), `export const b='fixed'`)
     for (let attempt = 0; attempt < 80 && (results.length === count || results.at(-1)); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
