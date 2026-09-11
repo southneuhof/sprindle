@@ -47,6 +47,40 @@ test('watcher startup compiles exactly once', { timeout: 120_000 }, async () => 
   expect(callbacks).toHaveLength(1)
 })
 
+test('watch ignores edits outside routes and inputs', { timeout: 120_000 }, async () => {
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    const start = callbacks.length
+    writeFileSync(join(root, 'notes.txt'), 'unrelated')
+    mkdirSync(join(root, 'scripts'), { recursive: true })
+    writeFileSync(join(root, 'scripts', 'tool.ts'), `export const tool = 1`)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(callbacks).toHaveLength(start)
+    writeFileSync(join(root, 'routes', 'health', '+server.ts'), `export const POST = () => 'changed'`)
+    for (let attempt = 0; attempt < 40 && callbacks.length === start; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(callbacks).toHaveLength(start + 1)
+    expect(callbacks.at(-1)).toBeUndefined()
+  } finally { await watcher.close() }
+})
+
+test('watch follows new dependency directories after import', { timeout: 120_000 }, async () => {
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    writeFileSync(join(root, 'helper.ts'), `export const value = 'one'`)
+    writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const POST = () => value`)
+    for (let attempt = 0; attempt < 40 && (callbacks.length < 2 || callbacks.at(-1)); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(callbacks.at(-1)).toBeUndefined()
+    const imported = callbacks.length
+    writeFileSync(join(root, 'helper.ts'), `export const value = 'two'`)
+    for (let attempt = 0; attempt < 40 && callbacks.length === imported; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+    for (let attempt = 0; attempt < 40 && callbacks.at(-1); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(callbacks.length).toBeGreaterThan(imported)
+    expect(callbacks.at(-1)).toBeUndefined()
+  } finally { await watcher.close() }
+})
+
 test('watch recovers after an invalid source tree is fixed', { timeout: 120_000 }, async () => {
   const root = fixture(); const errors: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => errors.push(error))

@@ -233,16 +233,12 @@ function declarationFiles(directory: string): string[] {
 
 export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true, options: { declarations?: boolean } = {}) {
   let queue = Promise.resolve(), timer: ReturnType<typeof setTimeout> | undefined, closed = false
-  const project = resolve(projectRoot), watched = new Map<string, ReturnType<typeof watch>>()
-  const recursiveWatcher = watch(project, { recursive: true }, (_event, filename) => {
-    const path = filename?.toString().replaceAll('\\', '/') ?? ''
-    if (path.split('/').some((part) => part.startsWith('.sprindle')) || path.split('/').some((part) => ['.git', 'dist', 'dist-tooling', 'node_modules'].includes(part))) return
-    if (!closed) schedule()
-  })
+  const project = resolve(projectRoot), routesRoot = resolve(project, routesDirectory), watched = new Map<string, ReturnType<typeof watch>>()
   const directories = (directory: string): string[] => [directory, ...readdirSync(directory, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() && !entry.name.startsWith('.sprindle') && !['.git', 'dist', 'dist-tooling', 'node_modules'].includes(entry.name) ? directories(resolve(directory, entry.name)) : [])]
+  const insideRoutes = (directory: string) => directory === routesRoot || directory.startsWith(`${routesRoot}/`)
   const refreshWatchers = () => {
     if (closed) return
-    const wanted = new Set([...directories(project), ...(dependencyInputs.get(project) ?? []).map(dirname)])
+    const wanted = new Set([...directories(routesRoot), ...(dependencyInputs.get(project) ?? []).map(dirname).filter((directory) => directory !== project && !insideRoutes(directory))])
     for (const directory of wanted) if (!watched.has(directory)) watched.set(directory, watch(directory, (_event, filename) => {
       if (filename?.toString().startsWith('.sprindle')) return
       if (!closed) { refreshWatchers(); schedule() }
@@ -251,6 +247,12 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
   }
   const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle, options).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) { refreshWatchers(); onResult?.(error) } })) }
   const schedule = () => { if (closed) return; if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = undefined; compile() }, 100) }
-  refreshWatchers(); compile(); await queue
+  compile(); await queue
+  refreshWatchers()
+  const recursiveWatcher = watch(routesRoot, { recursive: true }, (_event, filename) => {
+    const path = filename?.toString().replaceAll('\\', '/') ?? ''
+    if (path.split('/').some((part) => part.startsWith('.sprindle')) || path.split('/').some((part) => ['.git', 'dist', 'dist-tooling', 'node_modules'].includes(part))) return
+    if (!closed) schedule()
+  })
   return { close: async () => { closed = true; recursiveWatcher.close(); if (timer) { clearTimeout(timer); timer = undefined }; await queue; for (const watcher of watched.values()) watcher.close(); watched.clear() } }
 }
