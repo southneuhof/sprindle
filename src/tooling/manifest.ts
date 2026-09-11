@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { watch } from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
@@ -236,13 +236,26 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
   const project = resolve(projectRoot), routesRoot = resolve(project, routesDirectory), watched = new Map<string, ReturnType<typeof watch>>()
   const directories = (directory: string): string[] => [directory, ...readdirSync(directory, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() && !entry.name.startsWith('.sprindle') && !['.git', 'dist', 'dist-tooling', 'node_modules'].includes(entry.name) ? directories(resolve(directory, entry.name)) : [])]
   const insideRoutes = (directory: string) => directory === routesRoot || directory.startsWith(`${routesRoot}/`)
+  const inputFiles = new Map<string, Set<string>>()
   const refreshWatchers = () => {
     if (closed) return
-    const wanted = new Set([...directories(routesRoot), ...(dependencyInputs.get(project) ?? []).map(dirname).filter((directory) => directory !== project && !insideRoutes(directory))])
-    for (const directory of wanted) if (!watched.has(directory)) watched.set(directory, watch(directory, (_event, filename) => {
-      if (filename?.toString().startsWith('.sprindle')) return
-      if (!closed) { refreshWatchers(); schedule() }
-    }))
+    inputFiles.clear()
+    for (const input of dependencyInputs.get(project) ?? []) {
+      const directory = dirname(input)
+      if (insideRoutes(directory)) continue
+      let files = inputFiles.get(directory)
+      if (!files) { files = new Set(); inputFiles.set(directory, files) }
+      files.add(basename(input))
+    }
+    const wanted = new Set([...directories(routesRoot), ...inputFiles.keys()])
+    for (const directory of wanted) if (!watched.has(directory)) {
+      watched.set(directory, watch(directory, (_event, filename) => {
+        if (filename?.toString().startsWith('.sprindle')) return
+        const files = inputFiles.get(directory)
+        if (files && filename && !files.has(filename.toString())) return
+        if (!closed) { refreshWatchers(); schedule() }
+      }))
+    }
     for (const [directory, watcher] of watched) if (!wanted.has(directory)) { watcher.close(); watched.delete(directory) }
   }
   const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle, options).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) { refreshWatchers(); onResult?.(error) } })) }
