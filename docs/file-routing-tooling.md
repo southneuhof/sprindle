@@ -34,3 +34,14 @@ private consumer contract. The normal build, check, and development commands do
 not change. An alias can refer to a sibling file after a direct relative import
 has found that file. Alias-only sibling discovery, `.mts` and `.cts` declarations,
 and separate dependency versions for sibling trees are not supported.
+
+Declaration emission starts from route files, inherited scope files, and ambient
+TypeScript sources. TypeScript follows their imports, re-exports, path aliases,
+and type-only dependencies. The full staged project stays available for module
+resolution, and project diagnostics still check the full configured project.
+
+Production builds reuse an unchanged private consumer declaration after a
+TypeScript file-resolution probe validates all local, framework, compiler, and
+external type inputs. Missing or damaged metadata and contract files cause a
+normal declaration rebuild. The build keeps the last valid contract if that
+rebuild fails. This reuse is automatic and adds no command or public cache option.

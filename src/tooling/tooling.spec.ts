@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
@@ -17,9 +17,9 @@ function fixture() {
 }
 afterEach(() => projects.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
 
-function run(root: string, command = 'check.mjs') {
+function run(root: string, command = 'check.mjs', preload?: string) {
   return new Promise<{ code: number | null; output: string }>((resolve) => {
-    const child = spawn(process.execPath, ['--experimental-strip-types', join(import.meta.dirname, '../../tooling', command), root], { cwd: root })
+    const child = spawn(process.execPath, [...(preload ? ['--import', preload] : []), '--experimental-strip-types', join(import.meta.dirname, '../../tooling', command), root], { cwd: root })
     let output = ''; child.stdout.on('data', (data) => output += data); child.stderr.on('data', (data) => output += data)
     child.on('close', (code) => resolve({ code, output }))
   })
@@ -87,6 +87,42 @@ test('published build command writes a loadable static artifact', async () => {
   expect(result.output).toContain(join(root, '.sprindle', 'routes.mjs'))
   const manifest = await import(`${pathToFileURL(join(root, '.sprindle', 'routes.mjs')).href}?command`)
   expect(await manifest.default[0].handlers.GET()).toEqual({ ok: true })
+}, 120_000)
+
+test('separate unchanged builds skip declaration staging and emission', async () => {
+  const { root } = fixture()
+  mkdirSync(join(root, 'routes', 'health'))
+  const route = join(root, 'routes', 'health', '+server.ts')
+  writeFileSync(route, `export const GET=()=>({ok:true})`)
+  const internal = join(root, '.sprindle'); mkdirSync(internal)
+  const calls = join(internal, 'emits')
+  const preload = join(internal, 'count-emits.mjs')
+  writeFileSync(preload, `import childProcess from 'node:child_process';import {appendFileSync} from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=childProcess.spawnSync;childProcess.spawnSync=function(command,args,...rest){if(args?.includes('--listFiles')&&!args.includes('--listFilesOnly'))appendFileSync(${JSON.stringify(calls)},'emit\\n');return original.call(this,command,args,...rest)};syncBuiltinESMExports()`)
+  expect((await run(root, 'build.mjs', preload)).code).toBe(0)
+  expect(readFileSync(calls, 'utf8').match(/emit/g)).toHaveLength(1)
+  expect((await run(root, 'build.mjs', preload)).code).toBe(0)
+  expect(readFileSync(calls, 'utf8').match(/emit/g)).toHaveLength(1)
+  writeFileSync(route, `export const GET=()=>({ok:false})`)
+  expect((await run(root, 'build.mjs', preload)).code).toBe(0)
+  expect(readFileSync(calls, 'utf8').match(/emit/g)).toHaveLength(2)
+  const declaration = join(internal, 'routes.d.ts')
+  const version = readFileSync(declaration, 'utf8').match(/\.\/contracts\/([^/]+)\//)![1]
+  const contract = join(internal, 'contracts', version)
+  const backup = join(root, '.sprindle-saved-contract')
+  renameSync(contract, backup)
+  symlinkSync(join(root, 'missing-contract'), contract, 'dir')
+  const repaired = await run(root, 'build.mjs', preload)
+  expect(repaired, repaired.output).toMatchObject({ code: 0 })
+  expect(readFileSync(calls, 'utf8').match(/emit/g)).toHaveLength(3)
+  const repairedDeclaration = readFileSync(declaration, 'utf8')
+  const repairedVersion = repairedDeclaration.match(/\.\/contracts\/([^/]+)\//)![1]
+  expect(repairedVersion).toMatch(new RegExp(`^${version}-[a-f0-9]{8}$`))
+  expect(existsSync(join(internal, 'contracts', repairedVersion, 'routes', 'health', '+server.d.ts'))).toBe(true)
+  expect(lstatSync(contract).isSymbolicLink()).toBe(true)
+  expect(existsSync(join(backup, 'routes', 'health', '+server.d.ts'))).toBe(true)
+  expect((await run(root, 'build.mjs', preload)).code).toBe(0)
+  expect(readFileSync(calls, 'utf8').match(/emit/g)).toHaveLength(3)
+  expect(readFileSync(declaration, 'utf8')).toBe(repairedDeclaration)
 }, 120_000)
 
 test('published build command emits a usable contract for a sibling import', async () => {

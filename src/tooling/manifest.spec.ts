@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { compileRouteManifest, watchRouteManifest } from './manifest'
 
 const roots: string[] = []
@@ -30,7 +30,7 @@ test('writes one atomic artifact with file, helper, and extended config inputs',
   expect(run.stderr).toBe(''); expect(run.stdout).toBe('changed')
 })
 
-test('skips declarations when disabled', async () => {
+test('skips declarations when disabled', { timeout: 120_000 }, async () => {
   const root = fixture()
   const target = await compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', true, { declarations: false })
   const manifest = await import(`${pathToFileURL(target).href}?skipped`)
@@ -38,6 +38,69 @@ test('skips declarations when disabled', async () => {
   expect(existsSync(target.replace(/\.mjs$/, '.d.ts'))).toBe(false)
   await compileRouteManifest(root)
   expect(existsSync(target.replace(/\.mjs$/, '.d.ts'))).toBe(true)
+  expect(existsSync(target.replace(/\.mjs$/, '.declarations.json'))).toBe(true)
+  await compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', true, { declarations: false })
+  expect(existsSync(target.replace(/\.mjs$/, '.declarations.json'))).toBe(false)
+})
+
+test('rejects invalid reuse metadata and repairs a damaged immutable contract', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  await compileRouteManifest(root)
+  const declaration = join(root, '.sprindle', 'routes.d.ts')
+  const metadata = join(root, '.sprindle', 'routes.declarations.json')
+  writeFileSync(metadata, '{invalid')
+  await compileRouteManifest(root)
+  let valid = JSON.parse(readFileSync(metadata, 'utf8'))
+  expect(valid).toMatchObject({ version: 1 })
+  for (const files of [[], valid.files.slice(1)]) {
+    writeFileSync(metadata, JSON.stringify({ ...valid, files }))
+    await compileRouteManifest(root)
+    valid = JSON.parse(readFileSync(metadata, 'utf8'))
+    expect(valid.files.length).toBeGreaterThan(files.length)
+  }
+  const firstVersion = readFileSync(declaration, 'utf8').match(/\.\/contracts\/([^/]+)\//)![1]
+  const contract = join(root, '.sprindle', 'contracts', firstVersion, 'routes', 'health', '+server.d.ts')
+  writeFileSync(contract, 'damaged')
+  await compileRouteManifest(root)
+  const repairedVersion = readFileSync(declaration, 'utf8').match(/\.\/contracts\/([^/]+)\//)![1]
+  expect(repairedVersion).not.toBe(firstVersion)
+  expect(repairedVersion).toMatch(new RegExp(`^${firstVersion}-[a-f0-9]{8}$`))
+  expect(readFileSync(join(root, '.sprindle', 'contracts', repairedVersion, 'routes', 'health', '+server.d.ts'), 'utf8')).not.toBe('damaged')
+})
+
+test('does not reuse a contract through a link outside the output directory', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  await compileRouteManifest(root)
+  const declaration = join(root, '.sprindle', 'routes.d.ts')
+  const metadata = join(root, '.sprindle', 'routes.declarations.json')
+  const input = JSON.parse(readFileSync(metadata, 'utf8')).input
+  const version = readFileSync(declaration, 'utf8').match(/\.\/contracts\/([^/]+)\//)![1]
+  const contract = join(root, '.sprindle', 'contracts', version)
+  const outside = join(root, '.sprindle-outside-contract')
+  renameSync(contract, outside)
+  symlinkSync(outside, contract, 'dir')
+  await compileRouteManifest(root)
+  const repaired = readFileSync(declaration, 'utf8').match(/\.\/contracts\/([^/]+)\//)![1]
+  expect(repaired).toMatch(new RegExp(`^${version}-[a-f0-9]{8}$`))
+  expect(JSON.parse(readFileSync(metadata, 'utf8')).input).toBe(input)
+  expect(lstatSync(contract).isSymbolicLink()).toBe(true)
+  expect(existsSync(join(outside, 'routes', 'health', '+server.d.ts'))).toBe(true)
+})
+
+test('invalidates reuse when TypeScript selects a new external declaration', { timeout: 120_000 }, async () => {
+  const root = fixture(`import type {Result} from 'fixture-types';export const GET=():Result=>null as unknown as Result`)
+  const dependency = join(root, 'node_modules', 'fixture-types')
+  mkdirSync(dependency, { recursive: true })
+  writeFileSync(join(dependency, 'package.json'), JSON.stringify({ name: 'fixture-types', version: '1.0.0', types: 'index.d.ts' }))
+  writeFileSync(join(dependency, 'index.d.ts'), `export type {Result} from './result'`)
+  writeFileSync(join(dependency, 'result.d.ts'), `export interface Result { value: 'old' }`)
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler', moduleSuffixes: ['.server', ''], skipLibCheck: true } }))
+  await compileRouteManifest(root)
+  const metadata = join(root, '.sprindle', 'routes.declarations.json')
+  const first = JSON.parse(readFileSync(metadata, 'utf8')).input
+  writeFileSync(join(dependency, 'result.server.d.ts'), `export interface Result { value: 'new' }`)
+  await compileRouteManifest(root)
+  expect(JSON.parse(readFileSync(metadata, 'utf8')).input).not.toBe(first)
 })
 
 test('watcher startup compiles exactly once', { timeout: 120_000 }, async () => {
@@ -58,9 +121,7 @@ test('watch ignores edits outside routes and inputs', { timeout: 120_000 }, asyn
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(callbacks).toHaveLength(start)
     writeFileSync(join(root, 'routes', 'health', '+server.ts'), `export const POST = () => 'changed'`)
-    for (let attempt = 0; attempt < 40 && callbacks.length === start; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(callbacks).toHaveLength(start + 1)
-    expect(callbacks.at(-1)).toBeUndefined()
+    await vi.waitFor(() => { expect(callbacks).toHaveLength(start + 1); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   } finally { await watcher.close() }
 })
 
@@ -70,14 +131,10 @@ test('watch follows new dependency directories after import', { timeout: 120_000
   try {
     writeFileSync(join(root, 'helper.ts'), `export const value = 'one'`)
     writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const POST = () => value`)
-    for (let attempt = 0; attempt < 40 && (callbacks.length < 2 || callbacks.at(-1)); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(callbacks.at(-1)).toBeUndefined()
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThanOrEqual(2); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
     const imported = callbacks.length
     writeFileSync(join(root, 'helper.ts'), `export const value = 'two'`)
-    for (let attempt = 0; attempt < 40 && callbacks.length === imported; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-    for (let attempt = 0; attempt < 40 && callbacks.at(-1); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(callbacks.length).toBeGreaterThan(imported)
-    expect(callbacks.at(-1)).toBeUndefined()
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(imported); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   } finally { await watcher.close() }
 })
 
@@ -85,12 +142,11 @@ test('watch recovers after an invalid source tree is fixed', { timeout: 120_000 
   const root = fixture(); const errors: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => errors.push(error))
   const invalid = join(root, 'routes', 'bad route', '+server.ts'); mkdirSync(dirname(invalid), { recursive: true }); writeFileSync(invalid, 'export const GET = 1')
-  for (let attempt = 0; attempt < 40 && !errors.some(Boolean); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+  await vi.waitFor(() => expect(errors.some(Boolean)).toBe(true), { timeout: 30_000 })
   rmSync(dirname(invalid), { recursive: true }); writeFileSync(join(root, 'routes', 'health', '+server.ts'), 'export const GET = 1')
   const errorCount = errors.length
-  for (let attempt = 0; attempt < 40 && (errors.length === errorCount || errors.at(-1)); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+  await vi.waitFor(() => { expect(errors.length).toBeGreaterThan(errorCount); expect(errors.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   await watcher.close()
-  expect(errors.some(Boolean)).toBe(true); expect(errors.at(-1)).toBeUndefined()
 })
 
 test('watch close cancels a pending edit without reopening handles', { timeout: 120_000 }, async () => {
@@ -147,8 +203,7 @@ test('a cycle failure preserves output and watch mode recovers after removal', {
   const results: (Error | undefined)[] = []; const watcher = await watchRouteManifest(root, 'routes', (error) => results.push(error))
   try {
     writeFileSync(join(root, 'shared.ts'), `export const value='fixed'`)
-    for (let attempt = 0; attempt < 80 && results.at(-1); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(results.some(Boolean)).toBe(true); expect(results.at(-1)).toBeUndefined()
+    await vi.waitFor(() => { expect(results.some(Boolean)).toBe(true); expect(results.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   } finally { await watcher.close() }
 })
 
@@ -166,12 +221,9 @@ test('watch recovers when an external cycle is fixed by an external edit', { tim
   const watcher = await watchRouteManifest(root, 'routes', (error) => results.push(error))
   try {
     expect(results.at(-1)).toBeInstanceOf(Error)
-    for (let attempt = 0; attempt < 40 && results.length < 2; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
     const count = results.length
     writeFileSync(join(base, 'shared', 'b.ts'), `export const b='fixed'`)
-    for (let attempt = 0; attempt < 80 && (results.length === count || results.at(-1)); attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(results.length).toBeGreaterThan(count)
-    expect(results.at(-1)).toBeUndefined()
+    await vi.waitFor(() => { expect(results.length).toBeGreaterThan(count); expect(results.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   } finally { await watcher.close() }
 })
 
@@ -230,6 +282,47 @@ test('emits a self-contained contextual consumer contract through moves and dele
   writeFileSync(join(root, 'consumer.ts'), `import type {RouteContract} from './.sprindle/routes';type Entry<P,M>=Extract<RouteContract,{path:P;method:M}>['definition'];type Output<T>=NonNullable<T extends {readonly output?:infer O}?O:never>;type Input<T>=NonNullable<T extends {readonly input?:infer I}?I:never>;type Equal<A,B>=(<T>()=>T extends A?1:2) extends (<T>()=>T extends B?1:2)?true:false;type Expect<T extends true>=T;type _list=Expect<Equal<Output<Entry<'/items/nested/list','get'>>,{data:{id:string;age:number}[];page:number;limit:number;total:number}>>;type _create=Expect<Equal<Input<Entry<'/items/create','post'>>,{age:string}>>;type _custom=Expect<Equal<Output<Entry<'/items/nested/summary','get'>>,{payload:{value:number}}>>;type _generic=Expect<Equal<Output<Entry<'/items/nested/generic','get'>>,{result:{item:string};aliasResult:{alias:'resolved'}}>>;type Paths=RouteContract['path'];// @ts-expect-error transformed input accepts a string, not a number\nconst wrongInput:Input<Entry<'/items/create','post'>>={age:42};// @ts-expect-error moved route was deleted\nconst deleted:Paths='/items/moved';`)
   const checked = spawnSync(join(process.cwd(), 'node_modules', '.bin', 'tsc'), ['-p', join(root, 'tsconfig.json'), '--pretty', 'false'], { encoding: 'utf8' })
   expect(checked.status, checked.stdout + checked.stderr + '\n' + declaration).toBe(0)
+})
+
+test('limits declaration roots without losing route types', { timeout: 120_000 }, async () => {
+  const root = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-declaration-roots-')); roots.push(root)
+  mkdirSync(join(root, 'node_modules', '@southneuhof'), { recursive: true })
+  symlinkSync(join(import.meta.dirname, '..', '..'), join(root, 'node_modules', '@southneuhof', 'sprindle'), 'dir')
+  mkdirSync(join(root, 'routes', 'health'), { recursive: true })
+  mkdirSync(join(root, 'globals'))
+  mkdirSync(join(root, 'lib'))
+  mkdirSync(join(root, 'scripts'))
+  mkdirSync(join(root, 'tests'))
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler' }, include: ['**/*.ts'] }))
+  writeFileSync(join(root, 'globals', 'ambient.d.ts'), `interface AmbientDeclaration { ambient: 'declaration' }`)
+  writeFileSync(join(root, 'globals', 'script-global.ts'), `interface ScriptGlobal { script: 'global' }`)
+  writeFileSync(join(root, 'globals', 'module-global.ts'), `export {};declare global { interface ModuleGlobal { module: 'global' } }`)
+  writeFileSync(join(root, 'globals', 'module-augmentation.ts'), `export {};declare module '../lib/result' { interface Result { augmented: 'yes' } }`)
+  writeFileSync(join(root, 'lib', 'result.ts'), `export interface Result { value: 'base' }`)
+  writeFileSync(join(root, 'scripts', 'unrelated.ts'), `export interface UnrelatedScript { value: 'script' }`)
+  writeFileSync(join(root, 'tests', 'unrelated.test.ts'), `export interface UnrelatedTest { value: 'test' }`)
+  writeFileSync(join(root, 'tests', 'imported.test.ts'), `export interface ImportedTest { value: 'imported' }`)
+  writeFileSync(join(root, 'routes', 'health', '+server.ts'), `/// <reference path="../../globals/ambient.d.ts" />\nimport {defineRoute} from '@southneuhof/sprindle';import type {Result} from '../../lib/result';import type {ImportedTest} from '../../tests/imported.test';export const GET=defineRoute({action:()=>({ambient:({ambient:'declaration'} as AmbientDeclaration).ambient,script:({script:'global'} as ScriptGlobal).script,module:({module:'global'} as ModuleGlobal).module,imported:({value:'imported'} as ImportedTest).value,augmented:({value:'base',augmented:'yes'} as Result).augmented})})`)
+  await compileRouteManifest(root)
+  const declaration = readFileSync(join(root, '.sprindle', 'routes.d.ts'), 'utf8')
+  const version = declaration.match(/\.\/contracts\/([^/]+)\//)?.[1]
+  expect(version).toBeDefined()
+  const contract = join(root, '.sprindle', 'contracts', version!)
+  expect(existsSync(join(contract, 'scripts', 'unrelated.d.ts'))).toBe(false)
+  expect(existsSync(join(contract, 'tests', 'unrelated.test.d.ts'))).toBe(false)
+  expect(existsSync(join(contract, 'tests', 'imported.test.d.ts'))).toBe(true)
+  expect(existsSync(join(contract, 'globals', 'ambient.d.ts'))).toBe(true)
+  expect(existsSync(join(contract, 'globals', 'script-global.d.ts'))).toBe(true)
+  expect(existsSync(join(contract, 'globals', 'module-global.d.ts'))).toBe(true)
+  expect(existsSync(join(contract, 'globals', 'module-augmentation.d.ts'))).toBe(true)
+  rmSync(join(root, 'routes'), { recursive: true })
+  rmSync(join(root, 'globals'), { recursive: true })
+  rmSync(join(root, 'lib'), { recursive: true })
+  rmSync(join(root, 'scripts'), { recursive: true })
+  rmSync(join(root, 'tests'), { recursive: true })
+  writeFileSync(join(root, 'consumer.ts'), `import type {RouteContract} from './.sprindle/routes';type D=Extract<RouteContract,{path:'/health';method:'get'}>['definition'];type O=NonNullable<D extends {readonly output?:infer V}?V:never>;declare const output:O;const ambient:'declaration'=output.ambient;const script:'global'=output.script;const module:'global'=output.module;const imported:'imported'=output.imported;const augmented:'yes'=output.augmented;// @ts-expect-error ambient literal is exact\nconst wrong:O['ambient']='wrong';`)
+  const checked = spawnSync(join(process.cwd(), 'node_modules', '.bin', 'tsc'), ['-p', join(root, 'tsconfig.json'), '--pretty', 'false'], { encoding: 'utf8' })
+  expect(checked.status, checked.stdout + checked.stderr + declaration).toBe(0)
 })
 
 test.each([true, false])('emits a portable contract for sibling source type-only edits in bundle=%s mode', { timeout: 120_000 }, async (bundle) => {

@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { watch } from 'node:fs'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { parse } from 'jsonc-parser'
 import { parse as parseTypeScript } from '@babel/parser'
@@ -67,30 +68,44 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   try {
     if (bundle) await build({ stdin: { contents: source(hash), resolveDir: projectRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, outfile: temporary, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', sourcemap: 'inline' })
     else await writeFile(temporary, source(hash))
-    const publishDeclaration = emitDeclarations ? await emitRouteDeclarations(projectRoot, routesDirectory, model.routes, target.replace(/\.mjs$/, '.d.ts')) : undefined
+    const declaration = target.replace(/\.mjs$/, '.d.ts')
+    const metadata = declaration.replace(/\.d\.ts$/, '.declarations.json')
+    const publishDeclaration = emitDeclarations ? await emitRouteDeclarations(projectRoot, routesDirectory, model.routes, declaration, bundle) : undefined
     await rename(temporary, target)
     if (publishDeclaration) await publishDeclaration()
-    else await rm(target.replace(/\.mjs$/, '.d.ts'), { force: true })
+    else { await rm(declaration, { force: true }); await rm(metadata, { force: true }) }
   } finally {
     await rm(temporary, { force: true })
   }
   return target
 }
 
-async function emitRouteDeclarations(projectRoot: string, routesDirectory: string, routes: Awaited<ReturnType<typeof readRouteDirectory>>['routes'], declaration: string) {
+async function emitRouteDeclarations(projectRoot: string, routesDirectory: string, routes: Awaited<ReturnType<typeof readRouteDirectory>>['routes'], declaration: string, bundle: boolean) {
   const frameworkRoot = [resolve(import.meta.dirname, '../..'), resolve(import.meta.dirname, '..')].find((directory) => existsSync(resolve(directory, 'package.json')))
   if (!frameworkRoot) throw new Error('Sprindle package root is missing.')
   const definitionSource = resolve(frameworkRoot, 'src/routes/definition.ts')
+  const publicTypes = resolve(frameworkRoot, 'dist-types/index.d.ts')
   const virtualDefinition = resolve(projectRoot, '.__sprindle_route_definition.ts')
-  const overlay = routeLanguageOverlay(projectRoot, routesDirectory, new Map(), virtualDefinition)
-  overlay.set(virtualDefinition, readFileSync(definitionSource, 'utf8'))
-  for (const [file, source] of overlay) if (/\.[rs]\.d\.ts$/.test(file)) overlay.set(file, source.replace(/^export \* from .*$/m, `export * from '@southneuhof/sprindle'`))
+  const overlay = routeLanguageOverlayForDeclarations(projectRoot, routesDirectory, virtualDefinition, definitionSource)
   const commonSourceRoot = commonPath(projectRoot, [...overlay.keys()])
   const mappedPath = (file: string) => containedRelativePath(commonSourceRoot, file)
+  const compiler = resolveTypeScriptCompiler(frameworkRoot)
+  const projectConfig = resolve(projectRoot, 'tsconfig.json')
+  const shown = spawnSync(process.execPath, [compiler, '--showConfig', '-p', projectConfig], { cwd: projectRoot, encoding: 'utf8' })
+  if (shown.error || shown.status !== 0) throw new Error(`TypeScript config failed: ${shown.error?.message ?? shown.stdout + shown.stderr}`)
+  const effective = JSON.parse(shown.stdout) as { compilerOptions?: Record<string, unknown> }
+  const ambientSources = [...overlay].filter(([file, source]) => file.endsWith('.ts') && !file.endsWith('.d.ts') && contributesGlobals(source)).map(([file]) => file)
+  const sourceRoots = [...new Set([...routes.flatMap((route) => [route.sourcePath, ...route.scopes]), ...ambientSources, virtualDefinition])]
+  const probeRoots = [...new Set([...sourceRoots.filter((file) => file !== virtualDefinition), ...[...overlay.keys()].filter((file) => file.endsWith('.d.ts') && !/\.[rs]\.d\.ts$/.test(file) && existsSync(file)), definitionSource, publicTypes])]
+  const metadata = declaration.replace(/\.d\.ts$/, '.declarations.json')
+  const declarationInput = declarationInputKey(projectRoot, routesDirectory, declaration, bundle, routes, overlay, effective, compiler, projectConfig, probeRoots)
+  const inputKey = declarationInput?.key
+  if (inputKey && validDeclarationMetadata(metadata, declaration, inputKey)) return async () => {}
   const input = mkdtempSync(resolve(tmpdir(), `sprindle-contract-input-${process.pid}-`))
   const stagedProject = resolve(input, mappedPath(projectRoot))
   const temporary = resolve(projectRoot, `.sprindle-contract-${process.pid}-${randomUUID()}`)
   let declarationTemporary: string | undefined
+  let metadataTemporary: string | undefined
   try {
     for (const [file, source] of overlay) {
       const output = resolve(input, mappedPath(file))
@@ -105,11 +120,6 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
       const target = resolve(input, 'node_modules', name)
       if (!existsSync(target)) symlinkSync(resolve(frameworkModules, name), target, 'dir')
     }
-    const compiler = resolveTypeScriptCompiler(frameworkRoot)
-    const projectConfig = resolve(projectRoot, 'tsconfig.json')
-    const shown = spawnSync(process.execPath, [compiler, '--showConfig', '-p', projectConfig], { cwd: projectRoot, encoding: 'utf8' })
-    if (shown.error || shown.status !== 0) throw new Error(`TypeScript config failed: ${shown.error?.message ?? shown.stdout + shown.stderr}`)
-    const effective = JSON.parse(shown.stdout) as { compilerOptions?: Record<string, unknown> }
     const options = { ...effective.compilerOptions }
     const originalBase = resolve(projectRoot, typeof options.baseUrl === 'string' ? options.baseUrl : '.')
     const paths = options.paths as Record<string, string[]> | undefined
@@ -120,12 +130,11 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
     delete options.baseUrl
     Object.assign(options, { rootDir: input, outDir: temporary, declaration: true, emitDeclarationOnly: true, declarationMap: false, noEmit: false, composite: false, incremental: false, allowImportingTsExtensions: false, skipLibCheck: true })
     delete options.tsBuildInfoFile
-    const contextualSources = [...overlay.keys()].filter((file) => file.endsWith('.ts') && !file.endsWith('.d.ts') && file !== resolve(projectRoot, 'tsconfig.json'))
-    const rootFiles = [...new Set([...routes.flatMap((route) => [route.sourcePath, ...route.scopes]), ...contextualSources, virtualDefinition])].map((file) => resolve(input, mappedPath(file)))
+    const rootFiles = sourceRoots.map((file) => resolve(input, mappedPath(file)))
     mkdirSync(stagedProject, { recursive: true })
     const stagedConfig = resolve(stagedProject, 'tsconfig.json')
     writeFileSync(stagedConfig, JSON.stringify({ compilerOptions: options, files: rootFiles }))
-    const emitted = spawnSync(process.execPath, [compiler, '-p', stagedConfig, '--pretty', 'false'], { cwd: projectRoot, encoding: 'utf8' })
+    const emitted = spawnSync(process.execPath, [compiler, '-p', stagedConfig, '--pretty', 'false', '--listFiles'], { cwd: projectRoot, encoding: 'utf8' })
     if (emitted.error || emitted.status !== 0) throw new Error(`TypeScript declaration emit failed: ${emitted.error?.message ?? emitted.stdout + emitted.stderr}`)
     for (const [file, source] of overlay) if (file.endsWith('.d.ts')) {
       const output = resolve(temporary, mappedPath(file)); mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, source)
@@ -139,27 +148,192 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
     }
     const emittedFiles = declarationFiles(temporary).sort()
     const emittedContents = emittedFiles.map((file) => [relative(temporary, file).replaceAll(sep, '/'), readFileSync(file, 'utf8')])
-    const version = createHash('sha256').update(JSON.stringify(emittedContents)).digest('hex').slice(0, 24)
+    const contentVersion = createHash('sha256').update(JSON.stringify(emittedContents)).digest('hex').slice(0, 24)
+    let version = contentVersion
+    let contractDirectory = resolve(dirname(declaration), 'contracts', version)
+    if (lstatSync(contractDirectory, { throwIfNoEntry: false }) && !validContractDirectory(contractDirectory, dirname(declaration), emittedContents)) {
+      version = `${contentVersion}-${randomUUID().slice(0, 8)}`
+      contractDirectory = resolve(dirname(declaration), 'contracts', version)
+    }
     const contract = routes.flatMap((route) => route.methods.map((method) => {
       const modulePath = `./contracts/${version}/` + mappedPath(route.sourcePath).replaceAll('\\', '/').replace(/\.ts$/, '')
       return `{ path: ${JSON.stringify(route.httpPath)}; method: ${JSON.stringify(method.toLowerCase())}; definition: typeof import(${JSON.stringify(modulePath)})[${JSON.stringify(method)}] }`
     })).join(' | ') || 'never'
-    const contractDirectory = resolve(dirname(declaration), 'contracts', version)
     await mkdir(dirname(contractDirectory), { recursive: true })
     try { await rename(temporary, contractDirectory) } catch (error) {
       if (!existsSync(contractDirectory)) throw error
       await rm(temporary, { recursive: true, force: true })
     }
     declarationTemporary = `${declaration}.${process.pid}.${randomUUID()}.tmp`
-    await writeFile(declarationTemporary, `export type RouteContract = ${contract}\n`)
+    const declarationSource = `export type RouteContract = ${contract}\n`
+    await writeFile(declarationTemporary, declarationSource)
+    let finalInput: ReturnType<typeof declarationInputKey>, emittedExternal: string[] | undefined
+    try {
+      finalInput = declarationInput && declarationInputKey(projectRoot, routesDirectory, declaration, bundle, routes, routeLanguageOverlayForDeclarations(projectRoot, routesDirectory, virtualDefinition, definitionSource), effective, compiler, projectConfig, probeRoots, declarationInput.files)
+      const inputRoot = realpathSync(input)
+      emittedExternal = compilerFiles(emitted.stdout).map((file) => realpathSync(file)).filter((file) => containedRelativePathOrUndefined(inputRoot, file) === undefined)
+    } catch { /* a cache proof failure does not invalidate successful output */ }
+    if (inputKey && finalInput?.key === inputKey && emittedExternal?.every((file) => finalInput.realFiles.has(file))) {
+      const files = emittedContents.map(([file, source]) => [`contracts/${version}/${file}`, contentHash(source)])
+      metadataTemporary = `${metadata}.${process.pid}.${randomUUID()}.tmp`
+      await writeFile(metadataTemporary, JSON.stringify({ version: 1, input: inputKey, declaration: contentHash(declarationSource), contract: version, files }))
+    }
     const prepared = declarationTemporary
+    const preparedMetadata = metadataTemporary
     declarationTemporary = undefined
-    return async () => { try { await rename(prepared, declaration) } finally { await rm(prepared, { force: true }) } }
+    metadataTemporary = undefined
+    return async () => {
+      try {
+        await rename(prepared, declaration)
+        if (preparedMetadata) await rename(preparedMetadata, metadata)
+        else await rm(metadata, { force: true })
+      } finally { await rm(prepared, { force: true }); if (preparedMetadata) await rm(preparedMetadata, { force: true }) }
+    }
   } finally {
     await rm(input, { recursive: true, force: true })
     await rm(temporary, { recursive: true, force: true })
     if (declarationTemporary) await rm(declarationTemporary, { force: true })
+    if (metadataTemporary) await rm(metadataTemporary, { force: true })
   }
+}
+
+function routeLanguageOverlayForDeclarations(projectRoot: string, routesDirectory: string, virtualDefinition: string, definitionSource: string) {
+  const overlay = routeLanguageOverlay(projectRoot, routesDirectory, new Map(), virtualDefinition)
+  overlay.set(virtualDefinition, readFileSync(definitionSource, 'utf8'))
+  for (const [file, source] of overlay) if (/\.[rs]\.d\.ts$/.test(file)) overlay.set(file, source.replace(/^export \* from .*$/m, `export * from '@southneuhof/sprindle'`))
+  return overlay
+}
+
+function declarationInputKey(
+  projectRoot: string,
+  routesDirectory: string,
+  declaration: string,
+  bundle: boolean,
+  routes: Awaited<ReturnType<typeof readRouteDirectory>>['routes'],
+  overlay: Map<string, string>,
+  effective: object,
+  compiler: string,
+  projectConfig: string,
+  roots: string[],
+  resolvedFiles?: string[],
+) {
+  try {
+    const configs = localConfigInputs(projectConfig)
+    const files = configs && (resolvedFiles ?? probeCompilerFiles(compiler, projectRoot, projectConfig, roots))
+    if (!configs || !files?.length) return
+    const compilerPackage = resolve(dirname(compiler), '../package.json')
+    const compilerLoader = resolve(dirname(compiler), '../lib/tsc.js')
+    const compilerResolver = resolve(dirname(compiler), '../lib/getExePath.js')
+    const platformPackage = createRequire(compilerPackage).resolve(`@typescript/typescript-${process.platform}-${process.arch}/package.json`)
+    const executable = resolve(dirname(platformPackage), 'lib', process.platform === 'win32' ? 'tsc.exe' : 'tsc')
+    const direct = [...files, compiler, compilerLoader, compilerResolver, compilerPackage, platformPackage, executable, fileURLToPath(import.meta.url), ...configs]
+    const related = relatedInputFiles(direct, projectRoot)
+    const contents = [...new Set([...direct, ...related])].sort().map((file) => [file, realpathSync(file), contentHash(readFileSync(file))])
+    const local = [...overlay].sort(([left], [right]) => left.localeCompare(right))
+    const routeInput = routes.map(({ sourcePath, scopes, httpPath, methods, parameters }) => ({ sourcePath, scopes, httpPath, methods, parameters }))
+    const identity = { project: resolve(projectRoot), routes: resolve(projectRoot, routesDirectory), declaration: resolve(declaration), bundle, declarations: true }
+    return { key: contentHash(JSON.stringify([identity, routeInput, roots, local, effective, contents])), files, realFiles: new Set(files.map((file) => realpathSync(file))) }
+  } catch { return }
+}
+
+function probeCompilerFiles(compiler: string, projectRoot: string, projectConfig: string, roots: string[]) {
+  const directory = resolve(projectRoot, '.sprindle')
+  mkdirSync(directory, { recursive: true })
+  const config = resolve(directory, `probe-${process.pid}-${randomUUID()}.json`)
+  try {
+    writeFileSync(config, JSON.stringify({ extends: projectConfig, compilerOptions: { allowImportingTsExtensions: false, skipLibCheck: true }, files: roots, include: [], exclude: [] }))
+    const result = spawnSync(process.execPath, [compiler, '-p', config, '--pretty', 'false', '--listFilesOnly'], { cwd: projectRoot, encoding: 'utf8' })
+    return result.error || result.status !== 0 ? undefined : compilerFiles(result.stdout)
+  } finally { rmSync(config, { force: true }) }
+}
+
+function compilerFiles(output: string) {
+  return output.split(/\r?\n/).map((file) => file.trim()).filter((file) => isAbsolute(file) && existsSync(file))
+}
+
+function localConfigInputs(configFile: string, seen = new Set<string>()): string[] | undefined {
+  const file = resolve(configFile)
+  if (seen.has(file)) return []
+  seen.add(file)
+  const value = parse(readFileSync(file, 'utf8')) as { extends?: string | string[] } | undefined
+  const extended = typeof value?.extends === 'string' ? [value.extends] : value?.extends ?? []
+  if (extended.some((entry) => !entry.startsWith('.') && !isAbsolute(entry))) return
+  const parents = extended.map((entry) => { const target = resolve(dirname(file), entry); return extname(target) ? target : `${target}.json` })
+  const inherited = parents.map((parent) => localConfigInputs(parent, seen))
+  return inherited.some((files) => !files) ? undefined : [file, ...inherited.flatMap((files) => files!)]
+}
+
+function relatedInputFiles(files: string[], projectRoot: string) {
+  const found = new Set<string>()
+  const visited = new Set<string>()
+  const names = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package-lock.json', 'yarn.lock', 'bun.lock', 'bun.lockb']
+  for (const source of files) {
+    let directory = dirname(source)
+    while (true) {
+      if (visited.has(directory)) break
+      for (const name of names) { const file = resolve(directory, name); if (existsSync(file)) found.add(file) }
+      visited.add(directory)
+      const parent = dirname(directory)
+      if (parent === directory) break
+      directory = parent
+    }
+  }
+  let directory = resolve(projectRoot)
+  while (true) {
+    if (visited.has(directory)) break
+    for (const name of names) { const file = resolve(directory, name); if (existsSync(file)) found.add(file) }
+    visited.add(directory)
+    const parent = dirname(directory)
+    if (parent === directory) break
+    directory = parent
+  }
+  return [...found]
+}
+
+function validDeclarationMetadata(metadataFile: string, declaration: string, input: string) {
+  try {
+    const value = JSON.parse(readFileSync(metadataFile, 'utf8')) as unknown
+    if (!value || typeof value !== 'object') return false
+    const record = value as { version?: unknown; input?: unknown; declaration?: unknown; contract?: unknown; files?: unknown }
+    if (record.version !== 1 || record.input !== input || typeof record.declaration !== 'string' || typeof record.contract !== 'string' || !/^[a-f0-9]{24}(?:-[a-f0-9]{8})?$/.test(record.contract) || !Array.isArray(record.files) || !record.files.length) return false
+    const root = dirname(declaration)
+    const realRoot = realpathSync(root)
+    if (containedRelativePathOrUndefined(realRoot, realpathSync(declaration)) === undefined || contentHash(readFileSync(declaration, 'utf8')) !== record.declaration) return false
+    const contractRoot = resolve(root, 'contracts', record.contract)
+    const realContractRoot = realpathSync(contractRoot)
+    if (containedRelativePathOrUndefined(realRoot, realContractRoot) === undefined) return false
+    const expected = declarationFiles(contractRoot).map((file) => relative(root, file).replaceAll(sep, '/')).sort()
+    const recorded = record.files.map((item) => Array.isArray(item) && typeof item[0] === 'string' ? item[0] : '').sort()
+    if (JSON.stringify(recorded) !== JSON.stringify(expected)) return false
+    return record.files.every((item) => {
+      if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== 'string' || typeof item[1] !== 'string' || !item[0].startsWith(`contracts${sep}`) && !item[0].startsWith('contracts/')) return false
+      const file = resolve(root, item[0])
+      return containedRelativePathOrUndefined(realContractRoot, realpathSync(file)) !== undefined && contentHash(readFileSync(file, 'utf8')) === item[1]
+    })
+  } catch { return false }
+}
+
+function declarationContents(directory: string) {
+  return declarationFiles(directory).sort().map((file) => [relative(directory, file).replaceAll(sep, '/'), readFileSync(file, 'utf8')])
+}
+
+function validContractDirectory(directory: string, outputRoot: string, contents: string[][]) {
+  try {
+    const root = realpathSync(outputRoot), contract = realpathSync(directory)
+    if (containedRelativePathOrUndefined(root, contract) === undefined) return false
+    const files = declarationFiles(directory)
+    return files.every((file) => containedRelativePathOrUndefined(contract, realpathSync(file)) !== undefined) && JSON.stringify(declarationContents(directory)) === JSON.stringify(contents)
+  } catch { return false }
+}
+
+function contentHash(source: string | Buffer) {
+  return createHash('sha256').update(source).digest('hex')
+}
+
+function contributesGlobals(source: string) {
+  const program = parseTypeScript(source, { sourceType: 'module', plugins: ['typescript'] }).program
+  const isModule = program.body.some((statement) => statement.type === 'ImportDeclaration' || statement.type.startsWith('Export'))
+  return !isModule || program.body.some((statement) => statement.type === 'TSModuleDeclaration' && statement.declare)
 }
 
 function containedRelativePath(root: string, file: string) {
