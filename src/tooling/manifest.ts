@@ -58,7 +58,9 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   const target = resolve(projectRoot, output); await mkdir(dirname(target), { recursive: true })
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
   const source = (hash: string) => `${imports.join('\n')}\nexport const hash=${JSON.stringify(hash)};export default [${entries.join(',')}];`
-  const analysis = await build({ stdin: { contents: source('pending'), resolveDir: projectRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, write: false, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', metafile: true })
+  const placeholder = '0'.repeat(64)
+  const provisionalSource = source(placeholder)
+  const analysis = await build({ stdin: { contents: provisionalSource, resolveDir: projectRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, outfile: temporary, write: false, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', metafile: true, sourcemap: bundle ? 'inline' : false })
   const bundled = Object.keys(analysis.metafile.inputs).filter((file) => !file.endsWith('sprindle-routes.ts') && file !== '<stdin>').map((file) => isAbsolute(file) ? file : existsSync(resolve(file)) ? resolve(file) : resolve(projectRoot, file))
   const inputs = [...new Set([...bundled, ...(await configInputs(resolve(projectRoot, 'tsconfig.json')))])].sort()
   dependencyInputs.set(resolve(projectRoot), inputs)
@@ -66,8 +68,11 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   const contents = await Promise.all(inputs.map((file) => readFile(file, 'utf8')))
   const hash = createHash('sha256').update(JSON.stringify([portable, inputs, contents])).digest('hex')
   try {
-    if (bundle) await build({ stdin: { contents: source(hash), resolveDir: projectRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, outfile: temporary, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', sourcemap: 'inline' })
-    else await writeFile(temporary, source(hash))
+    if (bundle) {
+      if (analysis.outputFiles?.length !== 1 || !analysis.outputFiles[0]) throw new Error('Sprindle bundle finalization: expected one output file')
+      const output = finalizeBundle(analysis.outputFiles[0].text, provisionalSource, placeholder, hash)
+      await writeFile(temporary, output)
+    } else await writeFile(temporary, source(hash))
     const declaration = target.replace(/\.mjs$/, '.d.ts')
     const metadata = declaration.replace(/\.d\.ts$/, '.declarations.json')
     const publishDeclaration = emitDeclarations ? await emitRouteDeclarations(projectRoot, routesDirectory, model.routes, declaration, bundle) : undefined
@@ -78,6 +83,78 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
     await rm(temporary, { force: true })
   }
   return target
+}
+
+function replaceExportedHash(code: string, placeholder: string, hash: string): string {
+  if (!/^[a-f0-9]{64}$/.test(placeholder) || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('Sprindle bundle finalization: hash values must be 64 hexadecimal characters')
+  let program: ReturnType<typeof parseTypeScript>['program']
+  try {
+    program = parseTypeScript(code, { sourceType: 'module', plugins: ['typescript'] }).program
+  } catch (error) {
+    throw new Error(`Sprindle bundle finalization: unable to parse bundle output: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  let localName: string | undefined
+  let bindings = 0
+  for (const statement of program.body) {
+    if (statement.type !== 'ExportNamedDeclaration' || statement.source) continue
+    if (statement.declaration?.type === 'VariableDeclaration') {
+      for (const declarator of statement.declaration.declarations) {
+        if (declarator.id.type === 'Identifier' && declarator.id.name === 'hash') { bindings += 1; localName = 'hash' }
+      }
+    } else if (!statement.declaration) {
+      for (const specifier of statement.specifiers) {
+        if (specifier.type !== 'ExportSpecifier' || specifier.exported.type !== 'Identifier' || specifier.exported.name !== 'hash') continue
+        if (specifier.local.type !== 'Identifier') throw new Error('Sprindle bundle finalization: unexpected hash export shape')
+        bindings += 1
+        localName = specifier.local.name
+      }
+    }
+  }
+  if (bindings !== 1 || !localName) throw new Error('Sprindle bundle finalization: expected exactly one exported hash binding')
+  let start: number | undefined, end: number | undefined
+  let declarators = 0
+  for (const statement of program.body) {
+    const declaration = statement.type === 'VariableDeclaration' ? statement : statement.type === 'ExportNamedDeclaration' ? statement.declaration : undefined
+    if (!declaration || declaration.type !== 'VariableDeclaration') continue
+    for (const declarator of declaration.declarations) {
+      if (declarator.id.type !== 'Identifier' || declarator.id.name !== localName) continue
+      if (declarator.init?.type !== 'StringLiteral' || declarator.init.value !== placeholder) continue
+      if (typeof declarator.init.start !== 'number' || typeof declarator.init.end !== 'number') throw new Error('Sprindle bundle finalization: hash literal is missing source offsets')
+      declarators += 1
+      start = declarator.init.start
+      end = declarator.init.end
+    }
+  }
+  if (declarators !== 1 || start === undefined || end === undefined) throw new Error('Sprindle bundle finalization: expected one provisional hash literal')
+  const replacement = JSON.stringify(hash)
+  const current = code.slice(start, end)
+  if (replacement.length !== current.length) throw new Error('Sprindle bundle finalization: replacement hash length mismatch')
+  return code.slice(0, start) + replacement + code.slice(end)
+}
+
+function finalizeBundle(code: string, provisionalSource: string, placeholder: string, hash: string): string {
+  const comment = /\n\/\/# sourceMappingURL=data:application\/json;base64,([A-Za-z0-9+/=]+)\r?\n?$/
+  const match = comment.exec(code)
+  if (!match?.[1] || match.index === undefined) throw new Error('Sprindle bundle finalization: inline source map is missing')
+  const executable = code.slice(0, match.index)
+  const suffix = code.slice(match.index)
+  const payload = match[1]
+  let map: { version?: unknown; mappings?: unknown; sources?: unknown; sourcesContent?: unknown }
+  try {
+    map = JSON.parse(Buffer.from(payload, 'base64').toString('utf8')) as typeof map
+  } catch (error) {
+    throw new Error(`Sprindle bundle finalization: inline source map is invalid: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (map.version !== 3 || typeof map.mappings !== 'string' || !Array.isArray(map.sources) || !Array.isArray(map.sourcesContent)) throw new Error('Sprindle bundle finalization: inline source map has an unexpected shape')
+  if (!map.sources.every((source): source is string => typeof source === 'string') || !map.sourcesContent.every((source): source is string => typeof source === 'string')) throw new Error('Sprindle bundle finalization: inline source map has an unexpected shape')
+  if (map.sources.length !== map.sourcesContent.length) throw new Error('Sprindle bundle finalization: inline source map has an unexpected shape')
+  const generated = map.sourcesContent.filter((source) => source === provisionalSource)
+  if (generated.length !== 1) throw new Error('Sprindle bundle finalization: generated manifest source is missing from the source map')
+  const patchedExecutable = replaceExportedHash(executable, placeholder, hash)
+  const patchedGenerated = replaceExportedHash(generated[0]!, placeholder, hash)
+  const next = { ...map, sourcesContent: map.sourcesContent.map((source) => source === provisionalSource ? patchedGenerated : source) }
+  const nextPayload = Buffer.from(JSON.stringify(next)).toString('base64')
+  return patchedExecutable + suffix.replace(payload, nextPayload)
 }
 
 async function emitRouteDeclarations(projectRoot: string, routesDirectory: string, routes: Awaited<ReturnType<typeof readRouteDirectory>>['routes'], declaration: string, bundle: boolean) {

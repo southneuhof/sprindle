@@ -45,3 +45,5 @@ TypeScript file-resolution probe validates all local, framework, compiler, and
 external type inputs. Missing or damaged metadata and contract files cause a
 normal declaration rebuild. The build keeps the last valid contract if that
 rebuild fails. This reuse is automatic and adds no command or public cache option.
+
+Bundled manifest analysis and output use one bundle pass.

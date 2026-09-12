@@ -1,10 +1,16 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { afterEach, expect, test, vi } from 'vitest'
+import { build } from 'esbuild'
 import { compileRouteManifest, watchRouteManifest } from './manifest'
+
+vi.mock('esbuild', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('esbuild')>()
+  return { ...actual, build: vi.fn(actual.build) }
+})
 
 const roots: string[] = []
 function fixture(source = `export const GET = () => 'healthy'`) { const root = mkdtempSync(join(tmpdir(), 'sprindle-manifest-')); roots.push(root); mkdirSync(join(root, 'routes', 'health'), { recursive: true }); writeFileSync(join(root, 'tsconfig.json'), '{}'); writeFileSync(join(root, 'routes', 'health', '+server.ts'), source); return root }
@@ -392,4 +398,129 @@ test('versions type-only changes and preserves output string literals that resem
   writeFileSync(join(root, 'consumer.ts'), `import type {RouteContract} from './.sprindle/routes';type D=Extract<RouteContract,{path:'/health';method:'get'}>['definition'];type O=NonNullable<D extends {readonly output?:infer V}?V:never>;const ok:O={key:'u',extra:1,tag:'@lib/health'};// @ts-expect-error old field is absent\nconst old:O={id:'u',tag:'@lib/health'};// @ts-expect-error the output literal is unchanged\nconst wrong:O={key:'u',tag:'../../lib/health'};`)
   const checked = spawnSync(join(process.cwd(), 'node_modules', '.bin', 'tsc'), ['-p', join(root, 'tsconfig.json'), '--pretty', 'false'], { encoding: 'utf8' })
   expect(checked.status, checked.stdout + checked.stderr + second).toBe(0)
+})
+
+test('plan011 builds each manifest once', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  writeFileSync(join(root, 'config.base.json'), '{"compilerOptions":{"strict":true}}')
+  writeFileSync(join(root, 'tsconfig.json'), '{"extends":"./config.base.json"}')
+  const bundleTarget = join(root, '.sprindle', 'routes.mjs')
+  const sourceTarget = join(root, '.sprindle', 'routes-source.mjs')
+  let serial = 0
+  const readBoth = async () => {
+    serial += 1
+    const bundleModule = await import(`${pathToFileURL(bundleTarget).href}?plan011-${serial}-bundle`)
+    serial += 1
+    const sourceModule = await import(`${pathToFileURL(sourceTarget).href}?plan011-${serial}-source`)
+    return { bundleModule, sourceModule }
+  }
+  const compileBoth = async () => {
+    vi.mocked(build).mockClear()
+    await compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', true, { declarations: false })
+    expect(vi.mocked(build)).toHaveBeenCalledTimes(1)
+    vi.mocked(build).mockClear()
+    await compileRouteManifest(root, 'routes', '.sprindle/routes-source.mjs', false, { declarations: false })
+    expect(vi.mocked(build)).toHaveBeenCalledTimes(1)
+    return readBoth()
+  }
+  let { bundleModule, sourceModule } = await compileBoth()
+  expect(bundleModule.hash).toMatch(/^[a-f0-9]{64}$/)
+  expect(sourceModule.hash).toMatch(/^[a-f0-9]{64}$/)
+  expect(sourceModule.hash).toBe(bundleModule.hash)
+  expect(sourceModule.default[0].httpPath).toBe(bundleModule.default[0].httpPath)
+  expect(await sourceModule.default[0].handlers.GET()).toBe(await bundleModule.default[0].handlers.GET())
+  const firstHash = bundleModule.hash
+  ;({ bundleModule, sourceModule } = await compileBoth())
+  expect(bundleModule.hash).toBe(firstHash)
+  expect(sourceModule.hash).toBe(firstHash)
+  writeFileSync(join(root, 'helper.ts'), `export const value='one'`)
+  writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const GET = () => value`)
+  ;({ bundleModule, sourceModule } = await compileBoth())
+  expect(bundleModule.hash).not.toBe(firstHash)
+  expect(sourceModule.hash).toBe(bundleModule.hash)
+  expect(await bundleModule.default[0].handlers.GET()).toBe('one')
+  const helperHash = bundleModule.hash
+  writeFileSync(join(root, 'config.base.json'), '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true}}')
+  ;({ bundleModule, sourceModule } = await compileBoth())
+  expect(bundleModule.hash).not.toBe(helperHash)
+  expect(sourceModule.hash).toBe(bundleModule.hash)
+})
+
+test('plan011 preserves hash collisions and inline map contents', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  const placeholder = '0'.repeat(64)
+  const helperSource = `export const hash = '${placeholder}';\nexport const pendingText = 'pending';\nexport const resembling = 'export const hash = "kept"';\n`
+  const routeSource = `import { hash as helperHash, pendingText, resembling } from '../../helper';\nexport const GET = () => ({ helperHash, pendingText, resembling });\n`
+  writeFileSync(join(root, 'helper.ts'), helperSource)
+  writeFileSync(join(root, 'routes', 'health', '+server.ts'), routeSource)
+  const target = await compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', true, { declarations: false })
+  const manifest = await import(`${pathToFileURL(target).href}?plan011-collision`)
+  expect(manifest.hash).toMatch(/^[a-f0-9]{64}$/)
+  expect(await manifest.default[0].handlers.GET()).toEqual({ helperHash: placeholder, pendingText: 'pending', resembling: 'export const hash = "kept"' })
+  const text = readFileSync(target, 'utf8')
+  const match = text.match(/\n\/\/# sourceMappingURL=data:application\/json;base64,([A-Za-z0-9+/=]+)\r?\n?$/)
+  expect(match?.[1]).toBeDefined()
+  const map = JSON.parse(Buffer.from(match![1], 'base64').toString('utf8')) as { version: unknown; mappings: unknown; sources: unknown; sourcesContent: unknown }
+  expect(map.version).toBe(3)
+  expect(typeof map.mappings).toBe('string')
+  expect(Array.isArray(map.sources)).toBe(true)
+  expect(Array.isArray(map.sourcesContent)).toBe(true)
+  const sources = map.sources as string[]
+  const contents = map.sourcesContent as string[]
+  expect(sources.length).toBe(contents.length)
+  const helperIndex = sources.findIndex((source) => source.endsWith('helper.ts'))
+  const routeIndex = sources.findIndex((source) => source.endsWith('+server.ts'))
+  const generatedIndex = sources.findIndex((source) => source.endsWith('sprindle-routes.ts'))
+  expect(helperIndex).toBeGreaterThanOrEqual(0)
+  expect(routeIndex).toBeGreaterThanOrEqual(0)
+  expect(generatedIndex).toBeGreaterThanOrEqual(0)
+  expect(contents[helperIndex]).toBe(helperSource)
+  expect(contents[routeIndex]).toBe(routeSource)
+  expect(contents[generatedIndex]).toContain(`export const hash=${JSON.stringify(manifest.hash)}`)
+  expect(contents[generatedIndex]).not.toContain(`export const hash=${JSON.stringify(placeholder)}`)
+})
+
+test('plan011 preserves original stack locations', { timeout: 120_000 }, async () => {
+  const source = ['export const GET = () => {', '  throw new Error("plan011-map")', '}'].join('\n')
+  const root = fixture(source)
+  const target = await compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', true, { declarations: false })
+  const script = `const manifest = (await import(${JSON.stringify(pathToFileURL(target).href)})).default; manifest[0].handlers.GET();`
+  const run = spawnSync(process.execPath, ['--enable-source-maps', '--input-type=module', '--eval', script], { encoding: 'utf8' })
+  expect(run.status).not.toBe(0)
+  expect(run.stderr).toContain('plan011-map')
+  expect(run.stderr).toContain('+server.ts:2:')
+})
+
+test('plan011 preserves published output when finalization fails', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  const target = await compileRouteManifest(root)
+  const declaration = target.replace(/\.mjs$/, '.d.ts')
+  const metadata = declaration.replace(/\.d\.ts$/, '.declarations.json')
+  const savedRuntime = readFileSync(target, 'utf8')
+  const savedDeclaration = readFileSync(declaration, 'utf8')
+  const savedMetadata = readFileSync(metadata, 'utf8')
+  const actual = await vi.importActual<typeof import('esbuild')>('esbuild')
+  vi.mocked(build).mockClear()
+  vi.mocked(build).mockImplementationOnce(async (options: Parameters<typeof actual.build>[0]) => {
+    const result = await actual.build(options)
+    const output = result.outputFiles?.[0]
+    if (!output) return result
+    const stripped = output.text.replace(/\n\/\/# sourceMappingURL=data:application\/json;base64,[A-Za-z0-9+/=]+\r?\n?$/, '')
+    expect(stripped).not.toBe(output.text)
+    const bytes = new TextEncoder().encode(stripped)
+    return {
+      ...result,
+      outputFiles: [{ path: output.path, contents: bytes, hash: output.hash, get text() { return Buffer.from(bytes).toString('utf8') } }],
+    } as typeof result
+  })
+  try {
+    await expect(compileRouteManifest(root)).rejects.toThrow(/Sprindle bundle finalization:/)
+  } finally {
+    vi.mocked(build).mockClear()
+  }
+  expect(readFileSync(target, 'utf8')).toBe(savedRuntime)
+  expect(readFileSync(declaration, 'utf8')).toBe(savedDeclaration)
+  expect(readFileSync(metadata, 'utf8')).toBe(savedMetadata)
+  const leftovers = readdirSync(dirname(target)).filter((name) => name.startsWith('routes.mjs.') && name.endsWith('.tmp'))
+  expect(leftovers).toEqual([])
 })
