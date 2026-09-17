@@ -502,15 +502,21 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
   const refreshExternalInputs = () => {
     if (closed) return
     externalWatchFiles.clear()
+    const track = (file: string) => {
+      const directory = dirname(file)
+      let files = externalWatchFiles.get(directory)
+      if (!files) { files = new Set(); externalWatchFiles.set(directory, files) }
+      files.add(basename(file))
+    }
     for (const input of dependencyInputs.get(project) ?? []) {
       if (containedRelativePathOrUndefined(routesRoot, input) !== undefined) continue
       let real = input
       try { real = realpathSync(input) } catch { /* keep the recorded input path */ }
       if (containedRelativePathOrUndefined(routesRoot, real) !== undefined) continue
-      const directory = dirname(real)
-      let files = externalWatchFiles.get(directory)
-      if (!files) { files = new Set(); externalWatchFiles.set(directory, files) }
-      files.add(basename(real))
+      // Track the recorded and real paths. A symlinked parent reports events
+      // in either form, and a deleted file has no real path to resolve.
+      track(input)
+      if (real !== input) track(real)
     }
   }
   const externalMatches = (eventPath: string) => {
