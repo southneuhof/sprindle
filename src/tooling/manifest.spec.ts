@@ -165,6 +165,58 @@ test('watch close cancels a pending edit without reopening handles', { timeout: 
   expect(results).toHaveLength(count)
 })
 
+test('watch fires on new route directory add', { timeout: 120_000 }, async () => {
+  // A new route directory must start a compile.
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    const start = callbacks.length
+    const added = join(root, 'routes', 'added', '+server.ts'); mkdirSync(dirname(added), { recursive: true }); writeFileSync(added, `export const GET = () => 'added'`)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(start); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+  } finally { await watcher.close() }
+})
+
+test('watch fires on route directory rename', { timeout: 120_000 }, async () => {
+  // A renamed route directory must start a compile.
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    const added = join(root, 'routes', 'added', '+server.ts'); mkdirSync(dirname(added), { recursive: true }); writeFileSync(added, `export const GET = () => 'added'`)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(1); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    const moved = callbacks.length
+    renameSync(join(root, 'routes', 'added'), join(root, 'routes', 'moved'))
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(moved); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+  } finally { await watcher.close() }
+})
+
+test('watch fires on route file delete', { timeout: 120_000 }, async () => {
+  // A deleted route file must start a compile.
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    const start = callbacks.length
+    const route = join(root, 'routes', 'health', '+server.ts')
+    rmSync(route)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(start) }, { timeout: 30_000 })
+    writeFileSync(route, `export const GET = () => 'healthy'`)
+    await vi.waitFor(() => { expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+  } finally { await watcher.close() }
+})
+
+test('watch ignores tooling and dependency output writes', { timeout: 120_000 }, async () => {
+  // Tooling output writes must not start a compile.
+  const root = fixture(); const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    const start = callbacks.length
+    for (const file of [join(root, 'node_modules', 'pkg', 'index.js'), join(root, '.git', 'index'), join(root, 'dist', 'out.js'), join(root, '.sprindle', 'routes.mjs')]) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, 'ignored') }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(callbacks).toHaveLength(start)
+    writeFileSync(join(root, 'routes', 'health', '+server.ts'), `export const POST = () => 'changed'`)
+    await vi.waitFor(() => { expect(callbacks).toHaveLength(start + 1); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+  } finally { await watcher.close() }
+})
+
 function dependencyFixture(files: Record<string, string>) {
   const root = fixture()
   for (const [file, source] of Object.entries(files)) {
