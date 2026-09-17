@@ -601,8 +601,9 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
       const route = routeWatcher, dependency = dependencyWatcher
       routeWatcher = undefined
       dependencyWatcher = undefined
+      const closes = [route?.close(), dependency?.close()].filter((close) => close !== undefined)
       await queue
-      await Promise.all([route?.close(), dependency?.close()].filter((close) => close !== undefined))
+      await Promise.all(closes)
     },
   }
 }
