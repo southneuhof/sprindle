@@ -51,16 +51,23 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   const root = resolve(projectRoot, routesDirectory)
   const emitDeclarations = options.declarations ?? true
   const model = await readRouteDirectory(root)
-  const portable = model.routes.map((route) => ({ ...route, sourcePath: relative(projectRoot, route.sourcePath), scopes: route.scopes.map((scope) => relative(projectRoot, scope)) }))
+  const target = resolve(projectRoot, output)
+  const importRoot = dirname(target)
+  const portablePath = (file: string) => relative(projectRoot, file).replaceAll(sep, '/')
+  const moduleSpecifier = (file: string) => {
+    const specifier = relative(importRoot, file).replaceAll(sep, '/')
+    return specifier.startsWith('.') ? specifier : `./${specifier}`
+  }
+  const portable = model.routes.map((route) => ({ ...route, sourcePath: portablePath(route.sourcePath), scopes: route.scopes.map(portablePath) }))
   const imports: string[] = [], scopeNames = new Map<string, string>()
-  for (const scope of model.scopes) { const name = `scope${scopeNames.size}`; scopeNames.set(scope, name); imports.push(`import ${name} from ${JSON.stringify(scope)}`) }
-  const entries = model.routes.map((route, index) => { const name = `route${index}`; imports.push(`import * as ${name} from ${JSON.stringify(route.sourcePath)}`); return `{sourcePath:${JSON.stringify(relative(projectRoot, route.sourcePath))},httpPath:${JSON.stringify(route.httpPath)},parameters:${JSON.stringify(route.parameters)},methods:${JSON.stringify(route.methods)},scopes:[${route.scopes.map((scope) => scopeNames.get(scope)).join(',')}],handlers:${name}}` })
-  const target = resolve(projectRoot, output); await mkdir(dirname(target), { recursive: true })
+  for (const scope of model.scopes) { const name = `scope${scopeNames.size}`; scopeNames.set(scope, name); imports.push(`import ${name} from ${JSON.stringify(moduleSpecifier(scope))}`) }
+  const entries = model.routes.map((route, index) => { const name = `route${index}`; imports.push(`import * as ${name} from ${JSON.stringify(moduleSpecifier(route.sourcePath))}`); return `{sourcePath:${JSON.stringify(portablePath(route.sourcePath))},httpPath:${JSON.stringify(route.httpPath)},parameters:${JSON.stringify(route.parameters)},methods:${JSON.stringify(route.methods)},scopes:[${route.scopes.map((scope) => scopeNames.get(scope)).join(',')}],handlers:${name}}` })
+  await mkdir(dirname(target), { recursive: true })
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
   const source = (hash: string) => `${imports.join('\n')}\nexport const hash=${JSON.stringify(hash)};export default [${entries.join(',')}];`
   const placeholder = '0'.repeat(64)
   const provisionalSource = source(placeholder)
-  const analysis = await build({ stdin: { contents: provisionalSource, resolveDir: projectRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, outfile: temporary, write: false, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', metafile: true, sourcemap: bundle ? 'inline' : false })
+  const analysis = await build({ stdin: { contents: provisionalSource, resolveDir: importRoot, sourcefile: 'sprindle-routes.ts', loader: 'ts' }, outfile: temporary, write: false, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', metafile: true, sourcemap: bundle ? 'inline' : false })
   const bundled = Object.keys(analysis.metafile.inputs).filter((file) => !file.endsWith('sprindle-routes.ts') && file !== '<stdin>').map((file) => isAbsolute(file) ? file : existsSync(resolve(file)) ? resolve(file) : resolve(projectRoot, file))
   const inputs = [...new Set([...bundled, ...(await configInputs(resolve(projectRoot, 'tsconfig.json')))])].sort()
   dependencyInputs.set(resolve(projectRoot), inputs)
