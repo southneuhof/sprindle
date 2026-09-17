@@ -265,6 +265,20 @@ test('a cycle failure preserves output and watch mode recovers after removal', {
   } finally { await watcher.close() }
 })
 
+test('watch follows an atomic replacement of an external input', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  writeFileSync(join(root, 'helper.ts'), `export const value = 'one'`)
+  writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const GET = () => value`)
+  const callbacks: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  try {
+    const started = callbacks.length
+    writeFileSync(join(root, 'helper.ts.next'), `export const value = 'two'`)
+    renameSync(join(root, 'helper.ts.next'), join(root, 'helper.ts'))
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(started); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+  } finally { await watcher.close() }
+})
+
 test('watch recovers when an external cycle is fixed by an external edit', { timeout: 120_000 }, async () => {
   const base = mkdtempSync(join(tmpdir(), 'sprindle-external-watch-')); roots.push(base)
   const root = join(base, 'project')

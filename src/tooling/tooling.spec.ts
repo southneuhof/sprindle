@@ -35,7 +35,7 @@ function installTooling(root: string) {
   const extracted = spawnSync('tar', ['-xzf', archive, '--strip-components=1', '-C', installed], { encoding: 'utf8' })
   if (extracted.status) throw new Error(extracted.stderr)
   mkdirSync(join(installed, 'node_modules'), { recursive: true })
-  for (const dependency of ['typescript', 'esbuild', 'jsonc-parser', 'hono', 'zod', 'drizzle-orm']) symlinkSync(join(import.meta.dirname, '../../node_modules', dependency), join(installed, 'node_modules', dependency), 'dir')
+  for (const dependency of ['typescript', 'esbuild', 'jsonc-parser', 'hono', 'zod', 'drizzle-orm', 'chokidar']) symlinkSync(join(import.meta.dirname, '../../node_modules', dependency), join(installed, 'node_modules', dependency), 'dir')
   return installed
 }
 

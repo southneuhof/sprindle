@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { watch } from 'node:fs'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import chokidar, { type FSWatcher } from 'chokidar'
 import { build } from 'esbuild'
 import { parse } from 'jsonc-parser'
 import { parse as parseTypeScript } from '@babel/parser'
@@ -491,39 +491,118 @@ function declarationFiles(directory: string): string[] {
 
 export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true, options: { declarations?: boolean } = {}) {
   let queue = Promise.resolve(), timer: ReturnType<typeof setTimeout> | undefined, closed = false
-  const project = resolve(projectRoot), routesRoot = resolve(project, routesDirectory), watched = new Map<string, ReturnType<typeof watch>>()
-  const directories = (directory: string): string[] => [directory, ...readdirSync(directory, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() && !entry.name.startsWith('.sprindle') && !['.git', 'dist', 'dist-tooling', 'node_modules'].includes(entry.name) ? directories(resolve(directory, entry.name)) : [])]
-  const insideRoutes = (directory: string) => directory === routesRoot || directory.startsWith(`${routesRoot}/`)
-  const inputFiles = new Map<string, Set<string>>()
-  const refreshWatchers = () => {
-    if (closed) return
-    inputFiles.clear()
-    for (const input of dependencyInputs.get(project) ?? []) {
-      const directory = dirname(input)
-      if (insideRoutes(directory)) continue
-      let files = inputFiles.get(directory)
-      if (!files) { files = new Set(); inputFiles.set(directory, files) }
-      files.add(basename(input))
-    }
-    const wanted = new Set([...directories(routesRoot), ...inputFiles.keys()])
-    for (const directory of wanted) if (!watched.has(directory)) {
-      watched.set(directory, watch(directory, (_event, filename) => {
-        if (filename?.toString().startsWith('.sprindle')) return
-        const files = inputFiles.get(directory)
-        if (files && filename && !files.has(filename.toString())) return
-        if (!closed) { refreshWatchers(); schedule() }
-      }))
-    }
-    for (const [directory, watcher] of watched) if (!wanted.has(directory)) { watcher.close(); watched.delete(directory) }
+  const project = resolve(projectRoot), routesRoot = resolve(project, routesDirectory)
+  const routeIgnored = (file: string) => {
+    const path = relative(routesRoot, resolve(file)).replaceAll(sep, '/')
+    if (!path || path === '.') return false
+    return path.split('/').some((part) => part.startsWith('.sprindle') || ['.git', 'dist', 'dist-tooling', 'node_modules'].includes(part))
   }
-  const compile = () => { if (closed) return; queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle, options).then(() => { if (!closed) { refreshWatchers(); onResult?.() } }, (error: Error) => { if (!closed) { refreshWatchers(); onResult?.(error) } })) }
+  const externalWatchFiles = new Map<string, Set<string>>()
+  const externalWatchDirectories = (): string[] => [...externalWatchFiles.keys()]
+  const refreshExternalInputs = () => {
+    if (closed) return
+    externalWatchFiles.clear()
+    for (const input of dependencyInputs.get(project) ?? []) {
+      if (containedRelativePathOrUndefined(routesRoot, input) !== undefined) continue
+      let real = input
+      try { real = realpathSync(input) } catch { /* keep the recorded input path */ }
+      if (containedRelativePathOrUndefined(routesRoot, real) !== undefined) continue
+      const directory = dirname(real)
+      let files = externalWatchFiles.get(directory)
+      if (!files) { files = new Set(); externalWatchFiles.set(directory, files) }
+      files.add(basename(real))
+    }
+  }
+  const externalMatches = (eventPath: string) => {
+    const directory = externalWatchFiles.get(dirname(resolve(eventPath)))
+    if (directory?.has(basename(eventPath))) return true
+    try {
+      const real = realpathSync(eventPath)
+      return externalWatchFiles.get(dirname(real))?.has(basename(real)) ?? false
+    } catch { return false }
+  }
+  let routeWatcher: FSWatcher | undefined, dependencyWatcher: FSWatcher | undefined
+  const watchReady = (watcher: FSWatcher) => new Promise<void>((resolveReady, rejectReady) => {
+    let ready = false
+    const onReady = () => { ready = true; resolveReady() }
+    const onError = (error: Error) => { if (!ready) rejectReady(error); else if (!closed) onResult?.(error) }
+    watcher.on('ready', onReady)
+    watcher.on('error', onError)
+  })
+  const startDependencyWatcher = (directories: string[]) => {
+    const candidate = chokidar.watch(directories, { ignoreInitial: true, disableGlobbing: true, depth: 0, followSymlinks: false })
+    let ready = false
+    candidate.on('ready', () => { ready = true })
+    candidate.on('all', (_event, eventPath) => { if (!ready || closed || !externalMatches(eventPath)) return; schedule() })
+    const readyPromise = watchReady(candidate)
+    return { candidate, ready: readyPromise }
+  }
+  const compile = () => {
+    if (closed) return
+    queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle, options).then(async () => {
+      if (closed) return
+      refreshExternalInputs()
+      if (routeWatcher) await replaceDependencyWatcher()
+      if (!closed) onResult?.()
+    }, async (error: Error) => {
+      if (closed) return
+      refreshExternalInputs()
+      if (routeWatcher) await replaceDependencyWatcher()
+      if (!closed) onResult?.(error)
+    }))
+  }
+  const replaceDependencyWatcher = async () => {
+    const wanted = externalWatchDirectories()
+    const current = dependencyWatcher ? Object.keys(dependencyWatcher.getWatched()) : []
+    if (wanted.length === 0) {
+      const old = dependencyWatcher
+      dependencyWatcher = undefined
+      if (old) await old.close()
+      return
+    }
+    if (current.length === wanted.length && current.every((directory) => externalWatchFiles.has(directory))) return
+    const old = dependencyWatcher
+    const { candidate, ready } = startDependencyWatcher(wanted)
+    try { await ready } catch {
+      await candidate.close().catch(() => {})
+      return
+    }
+    if (closed) { await candidate.close(); return }
+    dependencyWatcher = candidate
+    if (old) await old.close()
+  }
   const schedule = () => { if (closed) return; if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = undefined; compile() }, 100) }
   compile(); await queue
-  refreshWatchers()
-  const recursiveWatcher = watch(routesRoot, { recursive: true }, (_event, filename) => {
-    const path = filename?.toString().replaceAll('\\', '/') ?? ''
-    if (path.split('/').some((part) => part.startsWith('.sprindle')) || path.split('/').some((part) => ['.git', 'dist', 'dist-tooling', 'node_modules'].includes(part))) return
-    if (!closed) schedule()
-  })
-  return { close: async () => { closed = true; recursiveWatcher.close(); if (timer) { clearTimeout(timer); timer = undefined }; await queue; for (const watcher of watched.values()) watcher.close(); watched.clear() } }
+  refreshExternalInputs()
+  routeWatcher = chokidar.watch(routesRoot, { ignoreInitial: true, disableGlobbing: true, ignored: routeIgnored })
+  const routeReady = watchReady(routeWatcher)
+  let routeIsReady = false
+  routeWatcher.on('ready', () => { routeIsReady = true })
+  routeWatcher.on('all', () => { if (!routeIsReady || closed) return; schedule() })
+  const initial = externalWatchDirectories()
+  if (initial.length > 0) {
+    const { candidate, ready } = startDependencyWatcher(initial)
+    try {
+      await Promise.all([routeReady, ready])
+      if (closed) { await candidate.close(); routeWatcher = undefined }
+      else dependencyWatcher = candidate
+    } catch (error) {
+      await candidate.close().catch(() => {})
+      const failed = routeWatcher
+      routeWatcher = undefined
+      if (failed) await failed.close().catch(() => {})
+      throw error
+    }
+  } else await routeReady
+  return {
+    close: async () => {
+      closed = true
+      if (timer) { clearTimeout(timer); timer = undefined }
+      const route = routeWatcher, dependency = dependencyWatcher
+      routeWatcher = undefined
+      dependencyWatcher = undefined
+      await queue
+      await Promise.all([route?.close(), dependency?.close()].filter((close) => close !== undefined))
+    },
+  }
 }

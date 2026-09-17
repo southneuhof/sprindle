@@ -17,5 +17,5 @@ const entries = {
   'language-server': join(root, 'tooling/language-server.mjs'),
   index: join(root, 'src/tooling/index.ts'),
 }
-await build({ entryPoints: entries, outdir: output, bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: true, external: ['typescript/unstable/sync', 'esbuild', 'jsonc-parser'] })
+await build({ entryPoints: entries, outdir: output, bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: true, external: ['typescript/unstable/sync', 'esbuild', 'jsonc-parser', 'chokidar'] })
 for (const name of ['build', 'check', 'dev', 'language-server']) chmodSync(join(output, `${name}.js`), 0o755)

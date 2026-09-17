@@ -47,3 +47,8 @@ normal declaration rebuild. The build keeps the last valid contract if that
 rebuild fails. This reuse is automatic and adds no command or public cache option.
 
 Bundled manifest analysis and output use one bundle pass.
+
+Sprindle watches route files and current compile inputs with Chokidar 3.6.
+Chokidar uses `fsevents` on macOS and shares a native parent stream. Chokidar
+falls back to polling on macOS if `fsevents` is not available. The macOS CI
+proof requires the native backend and a file limit of 128.
