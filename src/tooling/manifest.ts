@@ -199,10 +199,10 @@ async function emitRouteDeclarations(projectRoot: string, routesDirectory: strin
     mkdirSync(resolve(input, 'node_modules'), { recursive: true })
     const frameworkModules = resolve(frameworkRoot, 'node_modules')
     const projectModules = resolve(projectRoot, 'node_modules')
-    if (existsSync(projectModules)) for (const entry of readdirSync(projectModules, { withFileTypes: true })) symlinkSync(resolve(projectModules, entry.name), resolve(input, 'node_modules', entry.name), entry.isDirectory() ? 'dir' : 'file')
+    if (existsSync(projectModules)) for (const entry of readdirSync(projectModules, { withFileTypes: true })) { if (entry.isDirectory()) linkDirectory(resolve(projectModules, entry.name), resolve(input, 'node_modules', entry.name)); else symlinkSync(resolve(projectModules, entry.name), resolve(input, 'node_modules', entry.name), 'file') }
     for (const name of ['@types', 'hono', 'zod']) {
       const target = resolve(input, 'node_modules', name)
-      if (!existsSync(target)) symlinkSync(resolve(frameworkModules, name), target, 'dir')
+      if (!existsSync(target)) linkDirectory(resolve(frameworkModules, name), target)
     }
     const options = { ...effective.compilerOptions }
     const originalBase = resolve(projectRoot, typeof options.baseUrl === 'string' ? options.baseUrl : '.')
@@ -434,6 +434,10 @@ function commonPath(projectRoot: string, files: string[]) {
     root = parent
   }
   return root
+}
+
+function linkDirectory(target: string, path: string) {
+  symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
 }
 
 function containedRelativePathOrUndefined(root: string, file: string) {

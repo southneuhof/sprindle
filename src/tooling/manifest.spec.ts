@@ -11,6 +11,17 @@ vi.mock('esbuild', async (importOriginal) => {
   return { ...actual, build: vi.fn(actual.build) }
 })
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const seen: unknown[] = []
+  ;(globalThis as Record<string, unknown>).__manifestLinkKinds = seen
+  const symlinkSync = ((target: string, path: string, type?: unknown) => {
+    seen.push(type)
+    return actual.symlinkSync(target, path, (type === 'junction' ? 'dir' : type) as 'dir')
+  }) as typeof actual.symlinkSync
+  return { ...actual, symlinkSync }
+})
+
 const roots: string[] = []
 function fixture(source = `export const GET = () => 'healthy'`) { const root = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-manifest-')); roots.push(root); mkdirSync(join(root, 'routes', 'health'), { recursive: true }); writeFileSync(join(root, 'tsconfig.json'), '{}'); writeFileSync(join(root, 'routes', 'health', '+server.ts'), source); return root }
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
@@ -106,6 +117,24 @@ test('invalidates reuse when TypeScript selects a new external declaration', { t
   writeFileSync(join(dependency, 'result.server.d.ts'), `export interface Result { value: 'new' }`)
   await compileRouteManifest(root)
   expect(JSON.parse(readFileSync(metadata, 'utf8')).input).not.toBe(first)
+})
+
+test('contract staging links directories with junctions on Windows', { timeout: 120_000 }, async () => {
+  const { initialize } = await vi.importActual<typeof import('esbuild')>('esbuild')
+  await initialize({ worker: false })
+  const root = fixture()
+  const seen = (globalThis as Record<string, unknown>).__manifestLinkKinds as unknown[]
+  seen.length = 0
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+  try {
+    await compileRouteManifest(root)
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor)
+  }
+  const directoryKinds = seen.filter((kind) => kind === 'junction' || kind === 'dir')
+  expect(directoryKinds.length).toBeGreaterThan(0)
+  expect(directoryKinds.every((kind) => kind === 'junction')).toBe(true)
 })
 
 test('watcher startup compiles exactly once', { timeout: 120_000 }, async () => {
