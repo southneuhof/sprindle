@@ -1,6 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -13,7 +12,7 @@ vi.mock('esbuild', async (importOriginal) => {
 })
 
 const roots: string[] = []
-function fixture(source = `export const GET = () => 'healthy'`) { const root = mkdtempSync(join(tmpdir(), 'sprindle-manifest-')); roots.push(root); mkdirSync(join(root, 'routes', 'health'), { recursive: true }); writeFileSync(join(root, 'tsconfig.json'), '{}'); writeFileSync(join(root, 'routes', 'health', '+server.ts'), source); return root }
+function fixture(source = `export const GET = () => 'healthy'`) { const root = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-manifest-')); roots.push(root); mkdirSync(join(root, 'routes', 'health'), { recursive: true }); writeFileSync(join(root, 'tsconfig.json'), '{}'); writeFileSync(join(root, 'routes', 'health', '+server.ts'), source); return root }
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
 
 test('writes one atomic artifact with file, helper, and extended config inputs', { timeout: 120_000 }, async () => {
@@ -280,7 +279,7 @@ test('watch follows an atomic replacement of an external input', { timeout: 120_
 })
 
 test('watch recovers when an external cycle is fixed by an external edit', { timeout: 120_000 }, async () => {
-  const base = mkdtempSync(join(tmpdir(), 'sprindle-external-watch-')); roots.push(base)
+  const base = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-external-watch-')); roots.push(base)
   const root = join(base, 'project')
   mkdirSync(join(root, 'routes', 'health'), { recursive: true })
   mkdirSync(join(base, 'shared'))
@@ -300,7 +299,7 @@ test('watch recovers when an external cycle is fixed by an external edit', { tim
 })
 
 test('bundled scope and resource helpers execute after route source is removed', { timeout: 120_000 }, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'sprindle-resource-manifest-')); roots.push(root)
+  const root = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-resource-manifest-')); roots.push(root)
   const routesImport = '@southneuhof/sprindle'
   mkdirSync(join(root, 'node_modules', '@southneuhof'), { recursive: true })
   symlinkSync(join(import.meta.dirname, '..', '..'), join(root, 'node_modules', '@southneuhof', 'sprindle'), 'dir')
