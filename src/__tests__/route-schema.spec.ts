@@ -62,4 +62,38 @@ describe('file route schema', () => {
       defineRoute({ method: 'get', path: '/wrong', action: () => ({}) })
     }
   })
+
+  it('types defaultSort against entity keys', () => {
+    expectTypeOf(list as DefineFileList<typeof enrichedEntityScope, {}>).toBeFunction()
+    ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { defaultSort: 'name' } })
+    if (false) {
+      // @ts-expect-error unknown sort keys are rejected
+      ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { defaultSort: 'nope' } })
+      // @ts-expect-error sort carries no direction prefix; direction lives in order
+      ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { defaultSort: '-createdAt' } })
+    }
+  })
+
+  it('types defaultOrder against the wire directions', () => {
+    expectTypeOf(list as DefineFileList<typeof enrichedEntityScope, {}>).toBeFunction()
+    ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { defaultOrder: 'desc' } })
+    if (false) {
+      // @ts-expect-error only asc and desc are valid default orders
+      ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { defaultOrder: 'down' } })
+    }
+  })
+
+  it('types enumFilters keys against entity keys', () => {
+    expectTypeOf(list as DefineFileList<typeof enrichedEntityScope, {}>).toBeFunction()
+    ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { enumFilters: { name: ['a'] } } })
+    if (false) {
+      // @ts-expect-error unknown enum filter keys are rejected
+      ;(list as DefineFileList<typeof enrichedEntityScope, {}>)({ query: { enumFilters: { nope: ['a'] } } })
+    }
+  })
+
+  it('keeps entity-less list open to any key', () => {
+    expectTypeOf(list).toBeFunction()
+    list({})
+  })
 })

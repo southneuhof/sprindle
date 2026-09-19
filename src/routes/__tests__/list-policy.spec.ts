@@ -21,6 +21,7 @@ const buildApp = (listConfig: Parameters<typeof list>[0], observed: Record<strin
       list: list({
         before: ({ state }) => {
           observed.sort = state.query.sort
+          observed.order = state.query.order
           return undefined
         },
         ...listConfig,
@@ -78,5 +79,30 @@ describe('list query policy', () => {
     const app = buildApp({ query: { enumFilters: { categoryCode: ['heavy-equipments'] } } })
 
     expect((await app.request('/policy-items/list?categoryCode=')).status).toBe(200)
+  })
+
+  it('applies defaultSort with defaultOrder when the client sends no query', async () => {
+    const observed: Record<string, unknown> = {}
+    const app = buildApp({ query: { defaultSort: 'name', defaultOrder: 'desc' } }, observed)
+
+    const response = await app.request('/policy-items/list')
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { data: Item[] }
+    expect(body.data.map((row) => row.id)).toEqual(['b', 'a'])
+    expect(observed.sort).toBe('name')
+    expect(observed.order).toBe('desc')
+  })
+
+  it('lets a client-sent order override the defaultOrder', async () => {
+    const observed: Record<string, unknown> = {}
+    const app = buildApp({ query: { defaultSort: 'name', defaultOrder: 'desc' } }, observed)
+
+    const response = await app.request('/policy-items/list?order=asc')
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { data: Item[] }
+    expect(body.data.map((row) => row.id)).toEqual(['a', 'b'])
+    expect(observed.order).toBe('asc')
   })
 })
