@@ -58,9 +58,9 @@ export type CreateDrizzleSourceVirtualParam = {
   where: (value: unknown, columns: AliasSafeColumns) => SQL | Promise<SQL>
 }
 
-export type CreateDrizzleSourceRead = {
+export type CreateDrizzleSourceRead<TKey extends string = string> = {
   pinnedOrder?: SQL[] | ((columns: AliasSafeColumns) => SQL[])
-  searchColumns?: string[]
+  searchColumns?: readonly TKey[]
   virtual?: Record<string, CreateDrizzleSourceVirtualParam>
 }
 

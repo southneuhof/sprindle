@@ -1,5 +1,6 @@
 import { getTableColumns, getTableName, is, Many, One } from 'drizzle-orm'
 import type { AnyColumn } from 'drizzle-orm'
+import type { z } from 'zod'
 import { createDrizzleSource } from '../source/drizzle-source'
 import type { CreateDrizzleSourceRead } from '../source/drizzle-source'
 import { resolveThroughColumn } from '../source/drizzle-internals'
@@ -16,17 +17,22 @@ type EntitySchemas = {
   select: AnySchema
 }
 
+type EntitySelectKey<TSchemas extends EntitySchemas> =
+  [TSchemas['select']] extends [z.ZodType]
+    ? keyof z.output<TSchemas['select']> & string
+    : string;
+
 export type DomainEntity<TTable = unknown, TSchemas extends EntitySchemas = EntitySchemas> = ModelRuntimeEntity<TTable> & {
   [ENTITY_MARK]: true
   schemas: TSchemas
   table: TTable
-  read?: CreateDrizzleSourceRead
+  read?: CreateDrizzleSourceRead<EntitySelectKey<TSchemas>>
 }
 
 type CreateEntityConfig<TTable, TSchemas extends EntitySchemas> = {
   table: TTable
   schemas: TSchemas
-  read?: CreateDrizzleSourceRead
+  read?: CreateDrizzleSourceRead<EntitySelectKey<TSchemas>>
   relations?: never
 }
 
