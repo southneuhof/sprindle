@@ -53,8 +53,20 @@ export type CreateState<TInput> = { input: TInput; values: Partial<TInput> | und
 export type UpdateState<TInput> = { id: string; input: TInput; values: Partial<TInput> | undefined; where?: unknown }
 export type DeleteState = DetailState
 type RecordEnrich<TArgs, TRecord> = (record: TRecord, args: TArgs) => TRecord | void | Promise<TRecord | void>
+type ListQueryKey<TParent extends ScopeView<object, unknown>> =
+  [TParent['entity']] extends [never]
+    ? string
+    : [TParent['entity']] extends [{ schemas: { select: infer TSelect } }]
+      ? TSelect extends z.ZodType
+        ? keyof z.output<TSelect> & string
+        : string
+      : string;
 export type DefineFileList<TParent extends ScopeView, TParams extends RouteParameters> = (config?: FilePipeline<FileRouteArgs<TParams, TParent['context'], ListState, TParent['identity']>> & {
-  query?: { defaultSort?: string; enumFilters?: Record<string, readonly string[]> }
+  query?: {
+    defaultSort?: ListQueryKey<TParent>;
+    defaultOrder?: 'asc' | 'desc';
+    enumFilters?: Partial<Record<ListQueryKey<TParent>, readonly string[]>>;
+  }
   enrich?: (rows: PublicEntityRecord<TParent>[], args: FileRouteArgs<TParams, TParent['context'], ListState, TParent['identity']>) => PublicEntityRecord<TParent>[] | void | Promise<PublicEntityRecord<TParent>[] | void>
   run?: (args: FileRouteArgs<TParams, TParent['context'], ListState, TParent['identity']>) => { data: EntityRecord<TParent>[]; total: number } | Promise<{ data: EntityRecord<TParent>[]; total: number }>
 }) => FileRouteDefinition<unknown, { data: PublicEntityRecord<TParent>[]; page: number; limit: number; total: number }, 'list'>
