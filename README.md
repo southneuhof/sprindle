@@ -274,13 +274,17 @@ Application code does not import generated route artifacts directly.
 | `@southneuhof/sprindle`            | errors, models, routes, sources, validation  |
 | `@southneuhof/sprindle/hono`       | Hono integration and route manifests         |
 | `@southneuhof/sprindle/model`      | entities and domain schemas                  |
-| `@southneuhof/sprindle/entity`     | browser-safe entity/schema surface           |
+| `@southneuhof/sprindle/entity`     | portable entity declaration API              |
 | `@southneuhof/sprindle/routes`     | file routes, scopes, and resource operations |
 | `@southneuhof/sprindle/source`     | persistence contracts and Drizzle source     |
 | `@southneuhof/sprindle/validation` | shared validation schemas                    |
 | `@southneuhof/sprindle/openapi`    | OpenAPI generation                           |
 | `@southneuhof/sprindle/testing`    | application testing helpers                  |
 | `@southneuhof/sprindle/tooling`    | route tooling APIs                           |
+
+Carta web code imports backend schema values from the API module's physical
+`schema.ts` exports. See the
+[API schema boundary](../../docs/architecture/web-application-architecture.md#api-schema-boundary).
 
 ## What stays in the application
 

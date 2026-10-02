@@ -68,7 +68,7 @@ describe('declarative read contract over HTTP', () => {
     expect(await response.json()).toEqual({
       data: [reportRows[0]],
       page: 1,
-      limit: 20,
+      limit: 10,
       total: 1,
     })
   })
@@ -90,7 +90,7 @@ describe('declarative read contract over HTTP', () => {
     expect(await response.json()).toEqual({
       data: [reportRows[1], reportRows[0]],
       page: 1,
-      limit: 20,
+      limit: 10,
       total: 2,
     })
   })

@@ -1,6 +1,7 @@
 import { aliasedTable, and, asc, count, desc, eq, getTableColumns, getTableName, ilike, inArray, mapColumnsInSQLToAlias, notInArray, operators, or } from 'drizzle-orm'
 import type { AnyColumn, SQL } from 'drizzle-orm'
-import type { DomainEntity, DomainRelationField, DomainSchema } from '../model/domain-schema'
+import type { DomainEntity } from '../entity'
+import type { DomainRelationField, DomainSchema } from '../model/domain-schema'
 import { validationError } from '../errors'
 import { normalizeListQuery, requireStringParam } from '../validation'
 import { getPrimaryKeyEntries } from './drizzle-internals'

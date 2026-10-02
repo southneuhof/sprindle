@@ -17,7 +17,7 @@ const errors = {
 }
 const listParameters = [
   { name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
-  { name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+  { name: 'limit', schema: { type: 'integer', minimum: 1, default: 10 } },
   { name: 'search', schema: { type: 'string' } }, { name: 'sort', schema: { type: 'string' } },
   { name: 'order', schema: { type: 'string', enum: ['asc', 'desc'], default: 'asc' } },
 ]

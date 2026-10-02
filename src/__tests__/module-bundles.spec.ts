@@ -84,7 +84,7 @@ describe('module bundles', () => {
   it('serves canonical routes through the bundle path', async () => {
     const response = await appFromBundles.request('/items/list')
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ data: [], page: 1, limit: 20, total: 0 })
+    expect(await response.json()).toEqual({ data: [], page: 1, limit: 10, total: 0 })
     expect((await appFromBundles.request('/tools/list')).status).toBe(200)
     expect((await appFromBundles.request('/items/detail/nope')).status).toBe(404)
   })

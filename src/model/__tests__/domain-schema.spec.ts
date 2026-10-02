@@ -2,7 +2,8 @@ import { defineRelationsPart } from 'drizzle-orm'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { z } from 'zod/v4'
-import { createEntity, defineDomainPart, defineDomainSchema } from '../domain-schema'
+import { createEntity } from '../../entity'
+import { bindDomainDatabase, defineDomainPart, defineDomainSchema, isDomainEntity as isModelDomainEntity, isSourceBound } from '..'
 import type { DefineDomainPartConfig } from '../domain-schema'
 
 const users = pgTable('users', {
@@ -147,6 +148,33 @@ describe('defineDomainSchema', () => {
     type UpdateInput = z.input<typeof entity.schemas.update>
 
     expectTypeOf<UpdateInput>().toEqualTypeOf<{ name?: string; author?: { id: string } }>()
+  })
+
+  it('keeps entity identity, unbound errors, and source binding behavior', async () => {
+    const entity = createEntity({
+      table: users,
+      schemas: {
+        create: z.object({ id: z.string(), name: z.string() }),
+        update: z.object({ name: z.string() }),
+        select: z.object({ id: z.string(), name: z.string() }),
+      },
+    })
+    const unboundSource = entity.source
+
+    await expect(unboundSource.detail({ id: 'user-1', context: { name: entity.name, entity } })).rejects.toThrow(
+      'Domain database is not bound. Call bindDomainDatabase() before model routes run.',
+    )
+
+    const domainSchema = defineDomainSchema([defineDomainPart({ tables: { users }, entities: [entity] })])
+
+    expect(isModelDomainEntity(entity)).toBe(true)
+    expect(Object.getOwnPropertySymbols(entity)).toContain(Symbol.for('@southneuhof/sprindle/entity'))
+
+    bindDomainDatabase(domainSchema, {})
+
+    expect(domainSchema.entities[0]).toBe(entity)
+    expect(entity.source).not.toBe(unboundSource)
+    expect(isSourceBound(entity.source)).toBe(true)
   })
 
   it('uses declared tables, relation parts, and entities', () => {

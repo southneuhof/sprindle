@@ -1,40 +1,9 @@
 import { getTableColumns, getTableName, is, Many, One } from 'drizzle-orm'
 import type { AnyColumn } from 'drizzle-orm'
-import type { z } from 'zod'
 import { createDrizzleSource } from '../source/drizzle-source'
-import type { CreateDrizzleSourceRead } from '../source/drizzle-source'
 import { resolveThroughColumn } from '../source/drizzle-internals'
 import { markSourceBound } from './source-bound'
-import type { ModelRuntimeEntity, ModelSource } from '../source/model-source'
-
-const ENTITY_MARK = Symbol.for('@southneuhof/sprindle/entity')
-
-type AnySchema = { parse: (input: unknown) => unknown }
-
-type EntitySchemas = {
-  create: AnySchema
-  update: AnySchema
-  select: AnySchema
-}
-
-type EntitySelectKey<TSchemas extends EntitySchemas> =
-  [TSchemas['select']] extends [z.ZodType]
-    ? keyof z.output<TSchemas['select']> & string
-    : string;
-
-export type DomainEntity<TTable = unknown, TSchemas extends EntitySchemas = EntitySchemas> = ModelRuntimeEntity<TTable> & {
-  [ENTITY_MARK]: true
-  schemas: TSchemas
-  table: TTable
-  read?: CreateDrizzleSourceRead<EntitySelectKey<TSchemas>>
-}
-
-type CreateEntityConfig<TTable, TSchemas extends EntitySchemas> = {
-  table: TTable
-  schemas: TSchemas
-  read?: CreateDrizzleSourceRead<EntitySelectKey<TSchemas>>
-  relations?: never
-}
+import type { DomainEntity } from '../entity'
 
 type RelationConfig = { table: unknown; name?: string; relations: Record<string, unknown> }
 
@@ -69,27 +38,8 @@ export type DomainSchema = {
   tableKeyByEntity: Map<DomainEntity, string>
 }
 
-export function createEntity<TTable, const TSchemas extends EntitySchemas>(
-  config: CreateEntityConfig<TTable, TSchemas>,
-): DomainEntity<TTable, TSchemas> {
-  if ('relations' in (config as Record<string, unknown>)) throw new Error('createEntity() does not accept relations.')
-
-  return {
-    [ENTITY_MARK]: true,
-    name: getTableName(config.table as never),
-    table: config.table,
-    schemas: config.schemas,
-    read: config.read,
-    source: unboundSource(),
-  } as unknown as DomainEntity<TTable, TSchemas>
-}
-
 export function defineDomainPart<const TPart extends DefineDomainPartConfig>(config: TPart): TPart {
   return config
-}
-
-export function isDomainEntity(value: unknown): value is DomainEntity {
-  return Boolean(value && typeof value === 'object' && (value as { [ENTITY_MARK]?: true })[ENTITY_MARK])
 }
 
 export function defineDomainSchema(parts: readonly DomainPart[]): DomainSchema {
@@ -319,7 +269,7 @@ function unwrapZod(schema: unknown): unknown {
   return schema
 }
 
-function getZodShape(schema: AnySchema): Record<string, unknown> {
+function getZodShape(schema: { parse: (input: unknown) => unknown }): Record<string, unknown> {
   const shape = (schema as { shape?: unknown }).shape ?? getZodDef(schema)?.shape
   const value = typeof shape === 'function' ? shape() : shape
   if (!value || typeof value !== 'object') throw new Error('schemas.select must be a Zod object.')
@@ -338,11 +288,4 @@ function getZodArrayElement(schema: unknown) {
 
 function getZodDef(schema: unknown): Record<string, unknown> | undefined {
   return ((schema as { _def?: unknown; def?: unknown })?._def ?? (schema as { def?: unknown })?.def) as Record<string, unknown> | undefined
-}
-
-function unboundSource(): ModelSource {
-  const fail = async () => {
-    throw new Error('Domain database is not bound. Call bindDomainDatabase() before model routes run.')
-  }
-  return { list: fail, detail: fail, create: fail, update: fail, delete: fail, materialize: fail }
 }

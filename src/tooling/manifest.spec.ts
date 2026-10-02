@@ -343,7 +343,7 @@ test('bundled scope and resource helpers execute after route source is removed',
   const script = `import {Hono} from ${JSON.stringify(honoPackage)};import {installSprindle} from ${JSON.stringify(honoImport)};(async()=>{const manifest=(await import(${JSON.stringify(pathToFileURL(artifact).href)})).default;const response=await installSprindle(new Hono(),manifest).request('/items/list');process.stdout.write(JSON.stringify({status:response.status,body:await response.json()}))})()`
   const run = spawnSync(join(import.meta.dirname, '..', '..', '..', '..', 'apps', 'api', 'node_modules', '.bin', 'tsx'), ['--eval', script], { encoding: 'utf8' })
   expect(run.stderr).toBe('')
-  expect(JSON.parse(run.stdout)).toEqual({ status: 200, body: { data: [{ id: 'one' }], page: 1, limit: 20, total: 1 } })
+  expect(JSON.parse(run.stdout)).toEqual({ status: 200, body: { data: [{ id: 'one' }], page: 1, limit: 10, total: 1 } })
 })
 
 test('emits a self-contained contextual consumer contract through moves and deletion', { timeout: 120_000 }, async () => {

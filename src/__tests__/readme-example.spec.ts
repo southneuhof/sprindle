@@ -52,6 +52,6 @@ describe('README example', () => {
     const response = await app.request('/items/list')
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ data: [], page: 1, limit: 20, total: 0 })
+    expect(await response.json()).toEqual({ data: [], page: 1, limit: 10, total: 0 })
   })
 })

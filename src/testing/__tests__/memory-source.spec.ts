@@ -111,6 +111,9 @@ describe('testApp', () => {
     const response = await testApp([{ sourcePath: 'items/list/+server.ts', httpPath: '/items/list', parameters: [], methods: ['GET'], scopes: [scope], handlers: { GET: route } }]).request('/items/list')
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ data: [], page: 1, limit: 20, total: 0 })
+    expect(await response.json()).toEqual({ data: [], page: 1, limit: 10, total: 0 })
+    const large = await testApp([{ sourcePath: 'items/list/+server.ts', httpPath: '/items/list', parameters: [], methods: ['GET'], scopes: [scope], handlers: { GET: route } }]).request('/items/list?limit=1000')
+    expect(large.status).toBe(200)
+    expect(await large.json()).toEqual({ data: [], page: 1, limit: 1000, total: 0 })
   })
 })

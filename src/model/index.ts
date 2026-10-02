@@ -1,5 +1,7 @@
-export { bindDomainDatabase, createEntity, defineDomainPart, defineDomainSchema, isDomainEntity } from './domain-schema'
-export type { DefineDomainPartConfig, DomainEntity, DomainPart, DomainSchema } from './domain-schema'
+export { bindDomainDatabase, defineDomainPart, defineDomainSchema } from './domain-schema'
+export { createEntity, isDomainEntity } from '../entity'
+export type { DomainEntity } from '../entity'
+export type { DefineDomainPartConfig, DomainPart, DomainSchema } from './domain-schema'
 export { isSourceBound, markSourceBound } from './source-bound'
 export type { ModelRecordEnrich } from './record-enrich'
 export type {

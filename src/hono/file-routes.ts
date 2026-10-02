@@ -1,7 +1,7 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { toHttpError, validationError } from '../errors'
 import { attachDataWriteHook, getDataWriteHook } from '../model/data-write'
-import { isDomainEntity } from '../model/domain-schema'
+import { isDomainEntity } from '../entity'
 import { isSourceBound } from '../model/source-bound'
 import type { ModelRuntimeContext } from '../source'
 import { listQuerySchema, normalizeListQuery } from '../validation'

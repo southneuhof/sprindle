@@ -22,6 +22,7 @@ describe('file route OpenAPI', () => {
   it('declares list query and path parameters', () => {
     const listParameters = operation('/items/list', 'get').parameters as { name: string }[]
     expect(listParameters.map((value) => value.name)).toEqual(['page','limit','search','sort','order'])
+    expect(listParameters.find((value) => value.name === 'limit')).toEqual({ name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, default: 10 } })
     expect((operation('/items/detail/{id}', 'get').parameters as { name: string }[])[0]).toMatchObject({ name: 'id', in: 'path', required: true })
   })
   it('uses entity schemas and custom request bodies', () => {
