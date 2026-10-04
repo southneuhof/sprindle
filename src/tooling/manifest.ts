@@ -445,6 +445,10 @@ function containedRelativePathOrUndefined(root: string, file: string) {
   return isAbsolute(path) || path.split(sep).includes('..') ? undefined : path
 }
 
+function existingRealPath(file: string) {
+  try { return realpathSync(file) } catch { return undefined }
+}
+
 function resolveTypeScriptCompiler(frameworkRoot: string) {
   try {
     const packageFile = createRequire(resolve(frameworkRoot, 'package.json')).resolve('typescript/package.json')
@@ -496,10 +500,26 @@ function declarationFiles(directory: string): string[] {
 export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true, options: { declarations?: boolean } = {}) {
   let queue = Promise.resolve(), timer: ReturnType<typeof setTimeout> | undefined, closed = false
   const project = resolve(projectRoot), routesRoot = resolve(project, routesDirectory)
-  const routeIgnored = (file: string) => {
-    const path = relative(routesRoot, resolve(file)).replaceAll(sep, '/')
+  const routePathIgnored = (root: string, file: string) => {
+    const path = relative(root, file).replaceAll(sep, '/')
     if (!path || path === '.') return false
+    if (isAbsolute(path) || path.split('/').includes('..')) return true
     return path.split('/').some((part) => part.startsWith('.sprindle') || ['.git', 'dist', 'dist-tooling', 'node_modules'].includes(part))
+  }
+  const routeIgnored = (file: string) => routePathIgnored(routesRoot, resolve(project, file))
+  const routeRoots = [routesRoot]
+  const realRoutesRoot = existingRealPath(routesRoot)
+  if (realRoutesRoot && realRoutesRoot !== routesRoot) routeRoots.push(realRoutesRoot)
+  const routePathMatches = (root: string, file: string) => {
+    const path = relative(root, file)
+    return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`) && !routePathIgnored(root, file)
+  }
+  const routeInputMatches = (file: string) => {
+    const logical = resolve(project, file)
+    const candidates = [logical]
+    const real = existingRealPath(logical)
+    if (real && real !== logical) candidates.push(real)
+    return routeRoots.some((root) => candidates.some((candidate) => routePathMatches(root, candidate)))
   }
   const externalWatchFiles = new Map<string, Set<string>>()
   const externalWatchDirectories = (): string[] => [...externalWatchFiles.keys()]
@@ -524,13 +544,15 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     }
   }
   const externalMatches = (eventPath: string) => {
-    const directory = externalWatchFiles.get(dirname(resolve(eventPath)))
-    if (directory?.has(basename(eventPath))) return true
+    const file = resolve(project, eventPath)
+    const directory = externalWatchFiles.get(dirname(file))
+    if (directory?.has(basename(file))) return true
     try {
-      const real = realpathSync(eventPath)
+      const real = realpathSync(file)
       return externalWatchFiles.get(dirname(real))?.has(basename(real)) ?? false
     } catch { return false }
   }
+  const hasInput = (file: string) => routeInputMatches(file) || externalMatches(file)
   let routeWatcher: FSWatcher | undefined, dependencyWatcher: FSWatcher | undefined
   const watchReady = (watcher: FSWatcher) => new Promise<void>((resolveReady, rejectReady) => {
     let ready = false
@@ -605,6 +627,7 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     }
   } else await routeReady
   return {
+    hasInput,
     close: async () => {
       closed = true
       if (timer) { clearTimeout(timer); timer = undefined }

@@ -149,9 +149,14 @@ test('watch ignores edits outside routes and inputs', { timeout: 120_000 }, asyn
   const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
   try {
     const start = callbacks.length
+    expect(watcher.hasInput(join(root, 'routes/health/+server.ts'))).toBe(true)
+    expect(watcher.hasInput(join(root, 'routes/.sprindle-dev/generated.ts'))).toBe(false)
+    expect(watcher.hasInput(join(root, 'notes.txt'))).toBe(false)
     writeFileSync(join(root, 'notes.txt'), 'unrelated')
     mkdirSync(join(root, 'scripts'), { recursive: true })
-    writeFileSync(join(root, 'scripts', 'tool.ts'), `export const tool = 1`)
+    const tool = join(root, 'scripts', 'tool.ts')
+    writeFileSync(tool, `export const tool = 1`)
+    expect(watcher.hasInput(tool)).toBe(false)
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(callbacks).toHaveLength(start)
     writeFileSync(join(root, 'routes', 'health', '+server.ts'), `export const POST = () => 'changed'`)
@@ -163,12 +168,40 @@ test('watch follows new dependency directories after import', { timeout: 120_000
   const root = fixture(); const callbacks: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
   try {
-    writeFileSync(join(root, 'helper.ts'), `export const value = 'one'`)
-    writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const POST = () => value`)
+    const helper = join(root, 'helper.ts')
+    const route = join(root, 'routes', 'health', '+server.ts')
+    expect(watcher.hasInput(helper)).toBe(false)
+    expect(watcher.hasInput(route)).toBe(true)
+    writeFileSync(helper, `export const value = 'one'`)
+    writeFileSync(route, `import { value } from '../../helper'; export const POST = () => value`)
     await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThanOrEqual(2); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    expect(watcher.hasInput(helper)).toBe(true)
     const imported = callbacks.length
     writeFileSync(join(root, 'helper.ts'), `export const value = 'two'`)
     await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(imported); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    const beforeDelete = callbacks.length
+    rmSync(helper)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(beforeDelete); expect(callbacks.at(-1)).toBeInstanceOf(Error) }, { timeout: 30_000 })
+    expect(watcher.hasInput(helper)).toBe(true)
+    const beforeRestore = callbacks.length
+    writeFileSync(helper, `export const value = 'three'`)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(beforeRestore); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    expect(watcher.hasInput(helper)).toBe(true)
+    const shared = join(root, 'shared-real')
+    const linked = join(root, 'shared')
+    const realHelper = join(shared, 'helper.ts')
+    const linkedHelper = join(linked, 'helper.ts')
+    mkdirSync(shared)
+    symlinkSync(shared, linked, 'dir')
+    writeFileSync(realHelper, `export const value = 'linked-one'`)
+    const beforeLink = callbacks.length
+    writeFileSync(route, `import { value } from '../../shared/helper'; export const POST = () => value`)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(beforeLink); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    expect(watcher.hasInput(realHelper)).toBe(true)
+    expect(watcher.hasInput(linkedHelper)).toBe(true)
+    const beforeLinkedChange = callbacks.length
+    writeFileSync(realHelper, `export const value = 'linked-two'`)
+    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(beforeLinkedChange); expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   } finally { await watcher.close() }
 })
 

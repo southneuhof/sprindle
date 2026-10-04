@@ -78,6 +78,11 @@ scan source or load the compiler. The same directory model supplies batch and
 editor types, OpenAPI paths, and the private SDK contract. A developer uses the
 normal project commands and does not run a generator or import a generated file.
 
+`watchRouteManifest` returns `hasInput(file)` and `close()` on its watcher
+handle. `hasInput` reports files in the route tree and the currently tracked
+local compiler inputs. It applies the same generated-path, real-path, and
+deleted-input matching rules as the route watcher.
+
 Use `generateOpenApi(manifest, info)` or `generateInstalledOpenApi(info)`.
 Custom JSON routes can set `openapi.requestBody` to their Zod input schema.
 

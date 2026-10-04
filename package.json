@@ -39,7 +39,7 @@
     "build": "pnpm run type-check",
     "prepack": "node tooling/package.mjs",
     "type-check": "tsc -p tsconfig.json --noEmit --singleThreaded && node tooling/package.mjs",
-    "lint": "oxlint src",
+    "lint": "oxlint src tooling",
     "test": "node tooling/package.mjs && vitest run",
     "test:tooling": "node tooling/package.mjs && vitest run src/tooling",
     "test:watcher-resource": "node --test test/watcher-resource.proof.mjs",

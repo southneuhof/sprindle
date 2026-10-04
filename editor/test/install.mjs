@@ -11,5 +11,10 @@ try {
   const manifest = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8'))
   if (manifest.main !== './extension.cjs') throw new Error('Installed extension manifest is invalid.')
   if (!existsSync(join(installed, 'extension.cjs')) || !existsSync(join(installed, 'dist', 'language-server.mjs'))) throw new Error('Installed extension files are incomplete.')
+  const receipt = JSON.parse(readFileSync(join(installed, 'dist/editor-state.json'), 'utf8'))
+  if (receipt.schema !== 2 || typeof receipt.inputs?.fingerprint !== 'string' || !Array.isArray(receipt.payloads)) throw new Error('Installed editor state receipt is invalid.')
+  for (const path of ['extension.cjs', 'dist/language-server.mjs', 'dist-types/index.d.ts', 'routes/definition.ts']) {
+    if (!receipt.payloads.some((payload) => payload.path === path)) throw new Error(`Installed editor receipt does not include ${path}.`)
+  }
   process.stdout.write(`${installed}\n`)
 } finally { rmSync(root, { recursive: true, force: true }) }
