@@ -3,6 +3,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path'
 import { API } from 'typescript/unstable/sync'
 import { parse } from '@babel/parser'
 import { parse as parseJsonc } from 'jsonc-parser'
+import { routeBindingMetadata } from './bindings.ts'
 import { routeFileLocation } from './route-files.ts'
 
 type TextEdit = { start: number; end: number; text: string }
@@ -74,12 +75,6 @@ export function redirectSprindleImports(source: string, target: string) {
   return source
 }
 
-function scopeParents(root: string, file: string, files: Set<string>) {
-  const { segments } = routeFileLocation(root, file)
-  return [root, ...segments.map((_, index) => join(root, ...segments.slice(0, index + 1)))]
-    .reverse().map((path) => join(path, '+scope.ts')).find((candidate) => candidate !== file && files.has(candidate))
-}
-
 function contextProperty(source: string, name: string) {
   const program = syntax(source)
   for (const statement of program.body) {
@@ -100,8 +95,7 @@ function contextProperty(source: string, name: string) {
 
 function helperDeclaration(root: string, file: string, files: Set<string>, definition: string, publicTypes: string) {
   const directory = dirname(file)
-  const { parameters } = routeFileLocation(root, file)
-  const parentFile = scopeParents(root, file, files)
+  const { parameters, parentFile } = routeBindingMetadata(root, file, files)
   const parent = parentFile ? `typeof import(${JSON.stringify('./' + relative(directory, parentFile).replace(/\.ts$/, ''))}).default` : 'ScopeView<{}, never>'
   const params = `{${parameters.map((name) => `${JSON.stringify(name)}: string`).join(';')}}`
   const definitionImport = relative(directory, definition).replaceAll(sep, '/').replace(/\.ts$/, '')

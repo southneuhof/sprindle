@@ -44,6 +44,10 @@ export type FileRouteConfig<TParams extends RouteParameters, TContext extends ob
   action: (args: FileRouteArgs<TParams, TContext, TState, TIdentity>) => TOutput | Promise<TOutput>
 }
 export type FileRouteDefinition<TInput, TOutput, TKind extends string = 'route'> = { readonly input?: TInput; readonly output?: TOutput; readonly kind?: TKind }
+type RouteContractEntry<TEntry> = TEntry extends { httpPath: infer TPath extends string; methods: readonly (infer TMethod extends string)[]; handlers: infer THandlers }
+  ? TMethod extends keyof THandlers ? { path: TPath; method: Lowercase<TMethod>; definition: THandlers[TMethod] } : never
+  : never
+export type InferRouteContract<TManifest extends readonly unknown[]> = RouteContractEntry<TManifest[number]>
 export type DefineFileScope<TParent extends ScopeView<object, unknown>, TParams extends RouteParameters> = <TContext extends object = {}, TEntity = never, TSchema extends z.ZodType = never, TIdentity = TParent['identity']>(config: FileScopeConfig<TParent, TParams, TContext, TEntity, TSchema, TIdentity>) => ScopeView<ScopeContext<TParent, TContext>, ScopeEntity<TParent, TEntity>, [TSchema] extends [never] ? ScopePublicEntity<TParent, TEntity> : EnrichedEntity<ScopeEntity<TParent, TEntity>, TSchema>, TIdentity>
 export type DefineFileRoute<TParent extends ScopeView, TParams extends RouteParameters> = <TState extends object = {}, TOutput = Response | object, TBody extends z.ZodType | undefined = undefined>(config: FileRouteConfig<TParams, TParent['context'], TState, TOutput, TParent['identity']> & { openapi?: { requestBody?: TBody } }) => FileRouteDefinition<TBody extends z.ZodType ? { json: z.input<TBody> } : unknown, Awaited<TOutput>>
 
@@ -53,8 +57,20 @@ export type CreateState<TInput> = { input: TInput; values: Partial<TInput> | und
 export type UpdateState<TInput> = { id: string; input: TInput; values: Partial<TInput> | undefined; where?: unknown }
 export type DeleteState = DetailState
 type RecordEnrich<TArgs, TRecord> = (record: TRecord, args: TArgs) => TRecord | void | Promise<TRecord | void>
+type ListQueryKey<TParent extends ScopeView<object, unknown>> =
+  [TParent['entity']] extends [never]
+    ? string
+    : [TParent['entity']] extends [{ schemas: { select: infer TSelect } }]
+      ? TSelect extends z.ZodType
+        ? keyof z.output<TSelect> & string
+        : string
+      : string;
 export type DefineFileList<TParent extends ScopeView, TParams extends RouteParameters> = (config?: FilePipeline<FileRouteArgs<TParams, TParent['context'], ListState, TParent['identity']>> & {
-  query?: { defaultSort?: string; enumFilters?: Record<string, readonly string[]> }
+  query?: {
+    defaultSort?: ListQueryKey<TParent>;
+    defaultOrder?: 'asc' | 'desc';
+    enumFilters?: Partial<Record<ListQueryKey<TParent>, readonly string[]>>;
+  }
   enrich?: (rows: PublicEntityRecord<TParent>[], args: FileRouteArgs<TParams, TParent['context'], ListState, TParent['identity']>) => PublicEntityRecord<TParent>[] | void | Promise<PublicEntityRecord<TParent>[] | void>
   run?: (args: FileRouteArgs<TParams, TParent['context'], ListState, TParent['identity']>) => { data: EntityRecord<TParent>[]; total: number } | Promise<{ data: EntityRecord<TParent>[]; total: number }>
 }) => FileRouteDefinition<unknown, { data: PublicEntityRecord<TParent>[]; page: number; limit: number; total: number }, 'list'>

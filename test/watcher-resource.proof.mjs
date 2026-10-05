@@ -21,7 +21,7 @@ test('watcher works with a low file limit', { timeout: 60_000 }, async () => {
     const route = join(root, 'routes', 'health', '+server.ts')
     writeFileSync(route, `export const GET = () => 'healthy'`)
     const callbacks = []
-    const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error), '.sprindle/routes.mjs', false, { declarations: false })
+    const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error), '.sprindle/routes.mjs', false)
     try {
       assert.equal(callbacks.length, 1)
       assert.equal(callbacks[0], undefined)

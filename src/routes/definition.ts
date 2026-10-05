@@ -44,6 +44,10 @@ export type FileRouteConfig<TParams extends RouteParameters, TContext extends ob
   action: (args: FileRouteArgs<TParams, TContext, TState, TIdentity>) => TOutput | Promise<TOutput>
 }
 export type FileRouteDefinition<TInput, TOutput, TKind extends string = 'route'> = { readonly input?: TInput; readonly output?: TOutput; readonly kind?: TKind }
+type RouteContractEntry<TEntry> = TEntry extends { httpPath: infer TPath extends string; methods: readonly (infer TMethod extends string)[]; handlers: infer THandlers }
+  ? TMethod extends keyof THandlers ? { path: TPath; method: Lowercase<TMethod>; definition: THandlers[TMethod] } : never
+  : never
+export type InferRouteContract<TManifest extends readonly unknown[]> = RouteContractEntry<TManifest[number]>
 export type DefineFileScope<TParent extends ScopeView<object, unknown>, TParams extends RouteParameters> = <TContext extends object = {}, TEntity = never, TSchema extends z.ZodType = never, TIdentity = TParent['identity']>(config: FileScopeConfig<TParent, TParams, TContext, TEntity, TSchema, TIdentity>) => ScopeView<ScopeContext<TParent, TContext>, ScopeEntity<TParent, TEntity>, [TSchema] extends [never] ? ScopePublicEntity<TParent, TEntity> : EnrichedEntity<ScopeEntity<TParent, TEntity>, TSchema>, TIdentity>
 export type DefineFileRoute<TParent extends ScopeView, TParams extends RouteParameters> = <TState extends object = {}, TOutput = Response | object, TBody extends z.ZodType | undefined = undefined>(config: FileRouteConfig<TParams, TParent['context'], TState, TOutput, TParent['identity']> & { openapi?: { requestBody?: TBody } }) => FileRouteDefinition<TBody extends z.ZodType ? { json: z.input<TBody> } : unknown, Awaited<TOutput>>
 
