@@ -43,10 +43,13 @@ The graph preserves imported ordinary types and ambient contributors at their
 original paths. The frontend checker must resolve those imports as the backend
 does. A consumer project with a different `moduleSuffixes` setting can select a
 different file for an unsuffixed import when files such as `choice.ts` and
-`choice.web.ts` both exist. The current application has no such suffix pair.
-Generated imports pin a selected named `.server` source when required, but the
-source contract cannot promise identical resolution for every independent
-consumer configuration.
+`choice.consumer.ts` both exist. Carta uses ordinary shared source resolution.
+Its architecture check rejects nonempty `moduleSuffixes` settings in the API,
+web app and test, SDK, Loom, and utilities configs. It also rejects platform
+entries in Vite's extension list and platform-named variants in application and
+shared source. The check does not compare all package export conditions or
+aliases and does not prove every independent consumer config resolves the same
+files. Each independent consumer must resolve ordinary imports consistently.
 
 The public `@southneuhof/sprindle` declarations and editor TypeScript API remain
 separate from application route inference. A future route producer can replace
