@@ -733,8 +733,9 @@ test('builds both runtime modes with one bundler pass', { timeout: 120_000 }, as
   const readBoth = () => {
     const runner = join(root, '.sprindle', 'read-manifests.mjs')
     writeFileSync(runner, [
+      "import { pathToFileURL } from 'node:url'",
       'const [bundlePath, sourcePath] = process.argv.slice(2)',
-      'const [bundleModule, sourceModule] = await Promise.all([import(bundlePath), import(sourcePath)])',
+      'const [bundleModule, sourceModule] = await Promise.all([import(pathToFileURL(bundlePath).href), import(pathToFileURL(sourcePath).href)])',
       'const inspect = async (module) => ({ hash: module.hash, httpPath: module.default[0].httpPath, value: await module.default[0].handlers.GET() })',
       'process.stdout.write(JSON.stringify({ bundle: await inspect(bundleModule), source: await inspect(sourceModule) }))',
     ].join('\n'))
