@@ -720,7 +720,7 @@ test('bundled scope and resource helpers execute after route source is removed',
 })
 
 test('builds both runtime modes with one bundler pass', { timeout: 120_000 }, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'sprindle-dual-manifest-')); roots.push(root)
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'sprindle-dual-manifest-'))); roots.push(root)
   mkdirSync(join(root, 'routes', 'health'), { recursive: true })
   mkdirSync(join(root, 'node_modules'), { recursive: true })
   symlinkSync(resolve(import.meta.dirname, '../../../../apps/api/node_modules/tsx'), join(root, 'node_modules/tsx'), 'dir')
