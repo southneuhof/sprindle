@@ -730,13 +730,17 @@ test('builds both runtime modes with one bundler pass', { timeout: 120_000 }, as
   writeFileSync(join(root, 'tsconfig.json'), '{"extends":"./config.base.json"}')
   const bundleTarget = join(root, '.sprindle', 'routes.mjs')
   const sourceTarget = join(root, '.sprindle', 'routes-source.mjs')
-  let serial = 0
-  const readBoth = async () => {
-    serial += 1
-    const bundleModule = await import(`${pathToFileURL(bundleTarget).href}?plan011-${serial}-bundle`)
-    serial += 1
-    const sourceModule = await import(`${pathToFileURL(sourceTarget).href}?plan011-${serial}-source`)
-    return { bundleModule, sourceModule }
+  const readBoth = () => {
+    const runner = join(root, '.sprindle', 'read-manifests.mjs')
+    writeFileSync(runner, [
+      'const [bundlePath, sourcePath] = process.argv.slice(2)',
+      'const [bundleModule, sourceModule] = await Promise.all([import(bundlePath), import(sourcePath)])',
+      'const inspect = async (module) => ({ hash: module.hash, httpPath: module.default[0].httpPath, value: await module.default[0].handlers.GET() })',
+      'process.stdout.write(JSON.stringify({ bundle: await inspect(bundleModule), source: await inspect(sourceModule) }))',
+    ].join('\n'))
+    const result = spawnSync(process.execPath, ['--import', 'tsx', runner, bundleTarget, sourceTarget], { cwd: root, encoding: 'utf8' })
+    if (result.status !== 0) throw new Error(result.stderr || result.error?.message || 'Manifest runtime failed.')
+    return JSON.parse(result.stdout)
   }
   const compileBoth = async () => {
     vi.mocked(build).mockClear()
@@ -747,27 +751,28 @@ test('builds both runtime modes with one bundler pass', { timeout: 120_000 }, as
     expect(vi.mocked(build)).toHaveBeenCalledTimes(1)
     return readBoth()
   }
-  let { bundleModule, sourceModule } = await compileBoth()
-  expect(bundleModule.hash).toMatch(/^[a-f0-9]{64}$/)
-  expect(sourceModule.hash).toMatch(/^[a-f0-9]{64}$/)
-  expect(sourceModule.hash).toBe(bundleModule.hash)
-  expect(sourceModule.default[0].httpPath).toBe(bundleModule.default[0].httpPath)
-  expect(await sourceModule.default[0].handlers.GET()).toBe(await bundleModule.default[0].handlers.GET())
-  const firstHash = bundleModule.hash
-  ;({ bundleModule, sourceModule } = await compileBoth())
-  expect(bundleModule.hash).toBe(firstHash)
-  expect(sourceModule.hash).toBe(firstHash)
+  let { bundle, source } = await compileBoth()
+  expect(bundle.hash).toMatch(/^[a-f0-9]{64}$/)
+  expect(source.hash).toMatch(/^[a-f0-9]{64}$/)
+  expect(source.hash).toBe(bundle.hash)
+  expect(source.httpPath).toBe(bundle.httpPath)
+  expect(source.value).toBe(bundle.value)
+  const firstHash = bundle.hash
+  ;({ bundle, source } = await compileBoth())
+  expect(bundle.hash).toBe(firstHash)
+  expect(source.hash).toBe(firstHash)
   writeFileSync(join(root, 'helper.ts'), `export const value='one'`)
   writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const GET = () => value`)
-  ;({ bundleModule, sourceModule } = await compileBoth())
-  expect(bundleModule.hash).not.toBe(firstHash)
-  expect(sourceModule.hash).toBe(bundleModule.hash)
-  expect(await bundleModule.default[0].handlers.GET()).toBe('one')
-  const helperHash = bundleModule.hash
+  ;({ bundle, source } = await compileBoth())
+  expect(bundle.hash).not.toBe(firstHash)
+  expect(source.hash).toBe(bundle.hash)
+  expect(bundle.value).toBe('one')
+  expect(source.value).toBe('one')
+  const helperHash = bundle.hash
   writeFileSync(join(root, 'config.base.json'), '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true}}')
-  ;({ bundleModule, sourceModule } = await compileBoth())
-  expect(bundleModule.hash).not.toBe(helperHash)
-  expect(sourceModule.hash).toBe(bundleModule.hash)
+  ;({ bundle, source } = await compileBoth())
+  expect(bundle.hash).not.toBe(helperHash)
+  expect(source.hash).toBe(bundle.hash)
 })
 
 test('plan011 preserves hash collisions and inline map contents', { timeout: 120_000 }, async () => {
