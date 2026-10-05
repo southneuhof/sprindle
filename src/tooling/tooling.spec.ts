@@ -10,6 +10,8 @@ const projects: string[] = []
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'sprindle-tooling-test-')); projects.push(root)
   mkdirSync(join(root, 'routes'))
+  mkdirSync(join(root, 'node_modules'), { recursive: true })
+  symlinkSync(resolve(import.meta.dirname, '../../../../apps/api/node_modules/tsx'), join(root, 'node_modules/tsx'), 'dir')
   writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', skipLibCheck: true }, include: ['routes/**/*.ts'] }))
   const put = (name: string, source: string) => { const file = join(root, 'routes', name); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, `import { defineRoute } from '@southneuhof/sprindle';${source}`); return file }
   return { root, put }
@@ -132,7 +134,7 @@ test('separate builds publish immutable source versions while a reader stays act
   expect(readFileSync(sourcePointer, 'utf8')).toBe(sourceBefore)
 }, 120_000)
 
-test('installed package builds source with normal Node and keeps semantic checks available', async () => {
+test('installed package records route selections and supports semantic checks', async () => {
   const { root } = fixture()
   const installed = installTooling(root)
   writeFileSync(join(root, 'routes', '+scope.ts'), `import { defineScope, unauthorized } from '@southneuhof/sprindle';export default defineScope({context:()=>({user:{id:'u'}}),authorize:()=>{throw unauthorized()}})`)
@@ -145,14 +147,21 @@ test('installed package builds source with normal Node and keeps semantic checks
   const build = await runInstalled(root, installed, 'build'); expect(build, build.output).toMatchObject({ code: 0 })
   const typescriptLink = join(installed, 'node_modules', 'typescript')
   const typescriptSource = join(import.meta.dirname, '../../node_modules/typescript')
+  const runtimePath = join(root, '.sprindle', 'routes.mjs')
+  const pointerPath = join(root, '.sprindle', 'routes.ts')
+  const previous = [readFileSync(runtimePath, 'utf8'), readFileSync(pointerPath, 'utf8')]
   unlinkSync(typescriptLink)
   writeFileSync(route, "import { defineRoute } from '@southneuhof/sprindle';export const GET=defineRoute({action:()=>({changed:true})})")
   const withoutCompiler = await runInstalled(root, installed, 'build')
-  expect(withoutCompiler, withoutCompiler.output).toMatchObject({ code: 0 })
-  const runtime = await import(pathToFileURL(join(root, '.sprindle', 'routes.mjs')).href + '?without-compiler')
+  expect(withoutCompiler.code).toBe(1)
+  expect(withoutCompiler.output).toContain('TypeScript is not installed')
+  expect([readFileSync(runtimePath, 'utf8'), readFileSync(pointerPath, 'utf8')]).toEqual(previous)
+  symlinkSync(typescriptSource, typescriptLink, 'dir')
+  const rebuilt = await runInstalled(root, installed, 'build')
+  expect(rebuilt, rebuilt.output).toMatchObject({ code: 0 })
+  const runtime = await import(pathToFileURL(runtimePath).href + '?with-compiler')
   expect(await runtime.default[0].handlers.GET.config.action({})).toEqual({ changed: true })
   expect(existsSync(join(root, '.sprindle', 'routes.ts'))).toBe(true)
-  symlinkSync(typescriptSource, typescriptLink, 'dir')
   writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', skipLibCheck: true, types: ['node'] }, files: ['consumer.ts'] }))
   writeFileSync(join(root, 'consumer.ts'), "import type {RouteContract} from './.sprindle/routes';type Entry=Extract<RouteContract,{path:'/health';method:'get'}>['definition'];type Output=NonNullable<Entry extends {readonly output?:infer O}?O:never>;const value:Output={changed:true}")
   const consumer = spawnSync(process.execPath, [join(installed, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(root, 'tsconfig.json'), '--pretty', 'false'], { encoding: 'utf8' })

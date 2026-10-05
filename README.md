@@ -267,6 +267,17 @@ Sprindle also ships tooling for building, checking, and developing filesystem ro
 
 Application code does not import generated route artifacts directly.
 
+The route producer stores actual runtime and compiler selections for supported
+route imports with the immutable generated source graph. It fails when those
+selections disagree. Carta's normal web and SDK type-check commands compare
+consumer selections with that record. A failure names the importer, import,
+API target, consumer target, and consumer config. Runtime and declaration files
+can differ for a package when its `exports` or `main` and `types`/`typings`
+fields, or its `@types` mapping, declare the relationship. This check verifies
+package identity and the selected conditional branch for the API runtime,
+producer compiler, and consumer compiler. It does not verify third-party
+declaration correctness or computed imports.
+
 ## Package exports
 
 | Import                             | Purpose                                      |

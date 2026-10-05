@@ -20,6 +20,7 @@ function fixture() {
   symlinkSync(framework, join(root, 'node_modules', '@southneuhof', 'sprindle'), 'dir')
   symlinkSync(resolve(framework, 'node_modules', '@types'), join(root, 'node_modules', '@types'), 'dir')
   for (const name of ['hono', 'zod']) symlinkSync(resolve(framework, 'node_modules', name), join(root, 'node_modules', name), 'dir')
+  symlinkSync(resolve(repository, 'apps/api/node_modules/tsx'), join(root, 'node_modules', 'tsx'), 'dir')
   mkdirSync(join(root, 'routes', 'tenants', '[tenantId]', 'items', '[itemId]', 'create'), { recursive: true })
   mkdirSync(join(root, 'routes', 'status'), { recursive: true })
   mkdirSync(join(root, 'routes', 'shared'), { recursive: true })

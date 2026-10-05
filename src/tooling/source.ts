@@ -7,6 +7,7 @@ import { parse, type ParserOptions } from '@babel/parser'
 import { parse as parseJsonc } from 'jsonc-parser'
 import { helperSourceSpecifier, routeBindingMetadata } from './bindings.ts'
 import { readRouteDirectory, type RouteDirectory } from './route-files.ts'
+import { externalPackageTarget, isNodeBuiltin, openCompilerResolver, resolveRuntimeEdges, type RouteImportRecord } from './resolution.ts'
 
 type PathMapping = { pattern: string; targets: string[]; base: string }
 type ResolverSettings = { moduleSuffixes: string[]; paths: PathMapping[]; baseUrl?: string; inputs: Map<string, string> }
@@ -25,7 +26,8 @@ type StagedRouteSource = {
   origins: Map<string, string>
   entryModules: Map<string, string>
   runtimeSources: Map<string, string>
-  addRuntimeFile(file: string, contents: string): Promise<void>
+  runtimeImportSpecifiers: Map<RouteImportRecord, string>
+  addGeneratedFile(file: string, contents: string): Promise<void>
   publish(): Promise<void>
   cleanup(): Promise<void>
 }
@@ -42,7 +44,11 @@ function parserOptions(file: string): ParserOptions {
 }
 
 function contains(directory: string, file: string) {
-  const path = relative(resolve(directory), resolve(file))
+  const root = resolve(directory), target = resolve(file)
+  let physicalRoot: string, physicalTarget: string
+  try { physicalRoot = realpathSync(root) } catch { physicalRoot = root }
+  try { physicalTarget = realpathSync(target) } catch { physicalTarget = target }
+  const path = relative(physicalRoot, physicalTarget)
   return path !== '' && !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`)
 }
 
@@ -122,6 +128,7 @@ export async function stageRouteSource(projectRoot: string, model: RouteDirector
   const origins = new Map<string, string>()
   const entryModules = new Map<string, string>()
   const runtimeSources = new Map<string, string>()
+  const runtimeImportSpecifiers = new Map<RouteImportRecord, string>()
   const sourceModels = new Map<string, ReturnType<typeof routeBindingMetadata>>()
   const reverse = new Map<string, Set<string>>()
   const bindingModules = new Set<string>()
@@ -161,10 +168,17 @@ export async function stageRouteSource(projectRoot: string, model: RouteDirector
     const program = graph.parsed.get(original)!
     const metadata = sourceModels.get(original)!
     const helper = resolve(dirname(generated), `${metadata.helper}.ts`)
-    const transformed = rebaseProjectedSource(source, original, generated, helper, settings, entryModules, bindingModules.has(original), program)
+    const transformed = rebaseProjectedSource(source, original, generated, helper, settings, entryModules, bindingModules.has(original), program, graph)
     copiedFiles.set(generated, transformed.source)
     runtimeSources.set(generated, transformed.runtimeSource)
     origins.set(generated, original)
+    for (const [edge, specifier] of transformed.consumerSpecifiers) {
+      edge.consumerSource = relative(stageRoot, generated).replaceAll(sep, '/')
+      edge.consumerSpecifier = specifier.specifier
+      edge.consumerPosition = specifier.position
+      const runtimeSpecifier = transformed.runtimeSpecifiers.get(edge)
+      if (runtimeSpecifier) runtimeImportSpecifiers.set(edge, runtimeSpecifier)
+    }
   }
 
   const helpers = new Map<string, string>()
@@ -219,9 +233,10 @@ export async function stageRouteSource(projectRoot: string, model: RouteDirector
     origins,
     entryModules,
     runtimeSources,
+    runtimeImportSpecifiers,
     get version() { return version },
     get versionDirectory() { return versionDirectory },
-    async addRuntimeFile(file, contents) {
+    async addGeneratedFile(file, contents) {
       const target = resolve(stageRoot, file)
       await mkdir(dirname(target), { recursive: true })
       await writeFile(target, contents)
@@ -241,7 +256,16 @@ export async function stageRouteSource(projectRoot: string, model: RouteDirector
 }
 
 export function sourceInputOrigins(source: StagedRouteSource, file: string) {
-  return source.origins.get(resolve(file))
+  const target = resolve(file)
+  const direct = source.origins.get(target)
+  if (direct) return direct
+  let physical: string
+  try { physical = realpathSync(target) } catch { physical = target }
+  for (const [generated, origin] of source.origins) {
+    let generatedPhysical: string
+    try { generatedPhysical = realpathSync(generated) } catch { generatedPhysical = generated }
+    if (generatedPhysical === physical) return origin
+  }
 }
 
 export function generatedRuntimePlugin(graph: RouteSourceGraph, source: StagedRouteSource, runtimeFile: string): Plugin {
@@ -273,7 +297,7 @@ export function generatedRuntimePlugin(graph: RouteSourceGraph, source: StagedRo
   }
 }
 
-export async function routeSourceGraph(projectRoot: string, model: RouteDirectory) {
+export async function routeSourceGraph(projectRoot: string, model: RouteDirectory, runtimeMode: 'bundle' | 'source' = 'bundle') {
   const project = resolve(projectRoot)
   const settings = await resolverSettings(project)
   const ambientSources = await ambientTypeSources(project)
@@ -284,45 +308,102 @@ export async function routeSourceGraph(projectRoot: string, model: RouteDirector
   const staticGraph = new Map<string, string[]>()
   const contents = new Map<string, string>()
   const parsedSources = new Map<string, ParsedModule>()
-  while (pending.length) {
-    const file = pending.pop()!
-    if (graph.has(file) || relative(project, file).split(sep).includes('node_modules')) continue
-    const source = await readFile(file, 'utf8')
-    contents.set(file, source)
-    const dependencies = new Set<string>()
-    const runtimeDependencies = new Set<string>()
-    const staticDependencies = new Set<string>()
-    if (isRouteSourceFile(file) && extname(file) !== '.json') {
-      const parsedSource = parse(source, parserOptions(file))
-      parsedSources.set(file, parsedSource)
-      for (const specifier of moduleSpecifiers(parsedSource.program)) {
-        if (isSprindlePackageSpecifier(specifier.value)) continue
-        if (!specifier.value.startsWith('.') && !pathAlias(specifier.value, settings)) continue
-        const target = resolveSpecifier(file, specifier.value, settings)
-        if (!target) {
-          if (specifier.value.startsWith('.')) throw new Error(`${file}: unable to resolve source import ${specifier.value}`)
-          continue
+  const importEdges: RouteImportRecord[] = []
+  const graphEdgeTargets = new Map<RouteImportRecord, string>()
+  const compiler = await openCompilerResolver(project, resolve(project, 'tsconfig.json'), [...new Set([...entryFiles, ...ambientSources])])
+  const localTargets = (specifier: string, targets: string[]) => targets.filter((target) => !isNodeBuiltin(specifier) && !externalPackageTarget(specifier, target))
+  const graphTarget = (importer: string, specifier: string, target: string) => {
+    const candidate = resolveSpecifier(importer, specifier, settings)
+    if (!candidate) return target
+    try { return realpathSync(candidate) === realpathSync(target) ? candidate : target } catch { return candidate === target ? candidate : target }
+  }
+  const addTarget = (importer: string, target: string, kind: RouteImportRecord['kind']) => {
+    const dependencies = new Set(graph.get(importer) ?? [])
+    dependencies.add(target)
+    graph.set(importer, [...dependencies].sort())
+    if (kind !== 'type') {
+      const runtimeDependencies = new Set(runtimeGraph.get(importer) ?? [])
+      runtimeDependencies.add(target)
+      runtimeGraph.set(importer, [...runtimeDependencies].sort())
+    }
+    if (kind === 'static') {
+      const staticDependencies = new Set(staticGraph.get(importer) ?? [])
+      staticDependencies.add(target)
+      staticGraph.set(importer, [...staticDependencies].sort())
+    }
+    if (!graph.has(target)) pending.push(target)
+  }
+  const runtimeEdges = () => runtimeMode === 'source' ? importEdges.filter((edge) => edge.kind !== 'type' && !edge.runtimeTarget) : []
+  try {
+    while (pending.length) {
+      while (pending.length) {
+        const file = pending.pop()!
+        if (graph.has(file) || relative(project, file).split(sep).includes('node_modules')) continue
+        const source = await readFile(file, 'utf8')
+        contents.set(file, source)
+        graph.set(file, [])
+        runtimeGraph.set(file, [])
+        staticGraph.set(file, [])
+        if (!isRouteSourceFile(file) || extname(file) === '.json') continue
+        const parsedSource = parse(source, parserOptions(file))
+        parsedSources.set(file, parsedSource)
+        for (const specifier of moduleSpecifiers(parsedSource.program)) {
+          const position = specifier.node.start
+          if (typeof position !== 'number') throw new Error(`${file}: import ${specifier.value} has no source position`)
+          const typeTargets = compiler.select(file, position)
+          const selectedLocalTargets = localTargets(specifier.value, typeTargets).map((target) => graphTarget(file, specifier.value, target))
+          const packageSelected = typeTargets.some((target) => externalPackageTarget(specifier.value, target))
+          const discoveredTarget = selectedLocalTargets[0] ?? (specifier.kind !== 'type' && !packageSelected ? resolveSpecifier(file, specifier.value, settings) : undefined)
+          const runtimeOnlyTarget = !typeTargets.length && discoveredTarget && ['.js', '.jsx', '.mjs', '.cjs'].includes(extname(discoveredTarget))
+          if (specifier.kind === 'type' && !typeTargets.length) throw new Error(`${file}: unable to resolve type import ${specifier.value}`)
+          if (specifier.kind !== 'type' && specifier.kind !== 'require' && !typeTargets.length && !runtimeOnlyTarget && !isNodeBuiltin(specifier.value)) throw new Error(`${file}: unable to resolve import ${specifier.value}`)
+          const edge: RouteImportRecord = {
+            importer: file,
+            specifier: specifier.value,
+            position,
+            kind: specifier.kind,
+            typeTargets,
+            packageTarget: typeTargets.some((target) => externalPackageTarget(specifier.value, target)),
+          }
+          importEdges.push(edge)
+          for (const target of selectedLocalTargets) addTarget(file, target, specifier.kind)
+          if (discoveredTarget && !selectedLocalTargets.length && specifier.kind !== 'type') {
+            graphEdgeTargets.set(edge, discoveredTarget)
+            addTarget(file, discoveredTarget, specifier.kind)
+          } else if (discoveredTarget && specifier.kind === 'require') graphEdgeTargets.set(edge, discoveredTarget)
         }
-        if (relative(project, target).split(sep).includes('node_modules')) continue
-        dependencies.add(target)
-        if (specifier.kind === 'static' || specifier.kind === 'dynamic' || specifier.kind === 'require') runtimeDependencies.add(target)
-        if (specifier.kind === 'static') staticDependencies.add(target)
-        pending.push(target)
+        for (const comment of parsedSource.comments ?? []) {
+          if (!comment.value.includes('<reference') || !comment.value.includes('path=')) continue
+          const match = /path\s*=\s*['"]([^'"]+)['"]/.exec(comment.value)
+          if (!match?.[1]) continue
+          const target = resolveSpecifier(file, match[1], settings)
+          if (!target) throw new Error(`${file}: unable to resolve type reference ${match[1]}`)
+          addTarget(file, target, 'type')
+        }
       }
-      for (const comment of parsedSource.comments ?? []) {
-        if (!comment.value.includes('<reference') || !comment.value.includes('path=')) continue
-        const match = /path\s*=\s*['"]([^'"]+)['"]/.exec(comment.value)
-        if (!match?.[1]) continue
-        const target = resolveSpecifier(file, match[1], settings)
-        if (!target) throw new Error(`${file}: unable to resolve type reference ${match[1]}`)
-        dependencies.add(target)
-        pending.push(target)
+      const unresolved = runtimeEdges()
+      if (!unresolved.length) break
+      const targets = await resolveRuntimeEdges(project, unresolved, runtimeMode)
+      unresolved.forEach((edge, index) => {
+        const runtimeTarget = targets.get(index)
+        if (!runtimeTarget) throw new Error(`${edge.importer}: unable to resolve runtime import ${edge.specifier}`)
+        edge.runtimeTarget = runtimeTarget
+        edge.runtimeEvidence = 'node'
+        edge.packageTarget ||= !isNodeBuiltin(edge.specifier) && externalPackageTarget(edge.specifier, runtimeTarget)
+        for (const target of localTargets(edge.specifier, [runtimeTarget])) addTarget(edge.importer, graphTarget(edge.importer, edge.specifier, target), edge.kind)
+      })
+    }
+    if (runtimeMode === 'source') {
+      for (const edge of importEdges) {
+        if (edge.kind === 'type') continue
+        const typeTargets = localTargets(edge.specifier, edge.typeTargets)
+        const runtimeTargets = localTargets(edge.specifier, edge.runtimeTarget ? [edge.runtimeTarget] : [])
+        if (typeTargets.length && runtimeTargets.length && JSON.stringify(typeTargets.map((file) => realpathSync(file)).sort()) !== JSON.stringify(runtimeTargets.map((file) => realpathSync(file)).sort())) {
+          throw new Error(`${edge.importer}: producer compiler and source runtime select different files for ${edge.specifier}: ${typeTargets.join(', ')} versus ${runtimeTargets.join(', ')}`)
+        }
       }
     }
-    graph.set(file, [...dependencies].sort())
-    runtimeGraph.set(file, [...runtimeDependencies].sort())
-    staticGraph.set(file, [...staticDependencies].sort())
-  }
+  } finally { compiler.close() }
   const runtimeInputs = new Set<string>()
   const runtimePending = entryFiles.slice()
   while (runtimePending.length) {
@@ -331,7 +412,7 @@ export async function routeSourceGraph(projectRoot: string, model: RouteDirector
     runtimeInputs.add(file)
     runtimePending.push(...(runtimeGraph.get(file) ?? []))
   }
-  return { graph, runtimeGraph, staticGraph, runtimeInputs, contents, parsed: parsedSources, settingsInputs: settings.inputs, settings, ambientSources }
+  return { graph, runtimeGraph, staticGraph, runtimeInputs, contents, parsed: parsedSources, settingsInputs: settings.inputs, settings, ambientSources, importEdges, graphEdgeTargets, runtimeMode, producerCompiler: compiler.version, producerModuleResolution: compiler.moduleResolution, customConditions: compiler.customConditions }
 }
 
 export async function verifyRouteSourceIdentity(projectRoot: string, model: RouteDirectory, source: StagedRouteSource, snapshots: Map<string, string>) {
@@ -418,26 +499,70 @@ function isSprindlePackageSpecifier(value: string) {
   return value === '@southneuhof/sprindle' || value.startsWith('@southneuhof/sprindle/')
 }
 
-function rebaseProjectedSource(source: string, original: string, generated: string, helper: string, settings: ResolverSettings, projectedModules: Map<string, string>, bindHelpers: boolean, parsed: ParsedModule) {
+function runtimeSourceSpecifier(fromFile: string, target: string) {
+  let path = relative(dirname(fromFile), target).replaceAll(sep, '/')
+  if (!path.startsWith('../') && !path.startsWith('./')) path = `./${path}`
+  return path
+}
+
+function rebaseProjectedSource(source: string, original: string, generated: string, helper: string, settings: ResolverSettings, projectedModules: Map<string, string>, bindHelpers: boolean, parsed: ParsedModule, graph: RouteSourceGraph) {
   const edits: { start: number; end: number; value: string }[] = []
+  const runtimeEdits: { start: number; end: number; value: string }[] = []
+  const consumerPositions = new Map<RouteImportRecord, { specifier: string; position: number }>()
+  const runtimeSpecifiers = new Map<RouteImportRecord, string>()
   const helperPath = sourceModuleSpecifier(generated, helper)
+  const canonicalPath = (file: string) => {
+    try { return realpathSync(file) } catch { return resolve(file) }
+  }
+  const projectedTarget = (target: string) => projectedModules.get(target) ?? [...projectedModules].find(([file]) => canonicalPath(file) === canonicalPath(target))?.[1]
+  const sourceTarget = (target: string, authoredTarget?: string) => authoredTarget && canonicalPath(authoredTarget) === canonicalPath(target) ? authoredTarget : target
   for (const specifier of moduleSpecifiers(parsed.program)) {
+    const edge = graph.importEdges.find((item) => item.importer === resolve(original) && item.specifier === specifier.value && item.position === specifier.node.start)
+    if (edge) {
+      consumerPositions.set(edge, { specifier: specifier.value, position: specifier.node.start! })
+      runtimeSpecifiers.set(edge, specifier.value)
+    }
     if (bindHelpers && specifier.value === '@southneuhof/sprindle') {
       const node = specifier.node
-      if (node.start != null && node.end != null) edits.push({ start: node.start, end: node.end, value: JSON.stringify(helperPath) })
+      if (node.start != null && node.end != null) {
+        edits.push({ start: node.start, end: node.end, value: JSON.stringify(helperPath) })
+        runtimeEdits.push({ start: node.start, end: node.end, value: JSON.stringify(helperPath) })
+        if (edge) {
+          consumerPositions.set(edge, { specifier: helperPath, position: node.start })
+          runtimeSpecifiers.set(edge, helperPath)
+          edge.generatedBinding = true
+        }
+      }
       continue
     }
     if (isSprindlePackageSpecifier(specifier.value)) continue
-    if (!specifier.value.startsWith('.') && !pathAlias(specifier.value, settings)) continue
-    const resolved = resolveSpecifier(original, specifier.value, settings)
-    if (!resolved) {
+    const selectedTarget = edge?.typeTargets.find((target) => !externalPackageTarget(specifier.value, target)) ?? (specifier.kind !== 'type' ? edge?.runtimeTarget ?? (edge ? graph.graphEdgeTargets.get(edge) : undefined) ?? resolveSpecifier(original, specifier.value, settings) : edge?.typeTargets[0])
+    const authoredTarget = edge?.runtimeTarget ?? (edge ? graph.graphEdgeTargets.get(edge) : undefined) ?? resolveSpecifier(original, specifier.value, settings)
+    const resolved = selectedTarget ? sourceTarget(selectedTarget, authoredTarget) : undefined
+    if (resolved && (isNodeBuiltin(specifier.value) || externalPackageTarget(specifier.value, resolved))) continue
+    if (!resolved && (specifier.value.startsWith('.') || pathAlias(specifier.value, settings))) {
       if (specifier.value.startsWith('.')) throw new Error(`${original}: unable to resolve source import ${specifier.value}`)
       continue
     }
-    if (resolved === resolve(original)) continue
-    const target = projectedModules.get(resolved) ?? resolved
-    const value = sourceModuleSpecifier(generated, target)
-    if (specifier.node.start != null && specifier.node.end != null) edits.push({ start: specifier.node.start, end: specifier.node.end, value: JSON.stringify(value) })
+    if (!resolved || resolved === resolve(original)) continue
+    const typeTarget = projectedTarget(resolved) ?? resolved
+    const value = sourceModuleSpecifier(generated, typeTarget)
+    if (specifier.node.start != null && specifier.node.end != null) {
+      edits.push({ start: specifier.node.start, end: specifier.node.end, value: JSON.stringify(value) })
+      consumerPositions.set(edge!, { specifier: value, position: specifier.node.start })
+      const runtimeTarget = specifier.kind !== 'type' && graph.runtimeMode === 'source' ? edge?.runtimeTarget : resolved
+      if (runtimeTarget) {
+        const authoredRuntimeTarget = edge ? graph.graphEdgeTargets.get(edge) ?? resolveSpecifier(original, specifier.value, settings) : undefined
+        const logicalRuntimeTarget = sourceTarget(runtimeTarget, authoredRuntimeTarget)
+        const runtimeSpecifier = runtimeSourceSpecifier(generated, projectedTarget(logicalRuntimeTarget) ?? logicalRuntimeTarget)
+        runtimeEdits.push({ start: specifier.node.start, end: specifier.node.end, value: JSON.stringify(runtimeSpecifier) })
+        if (edge) runtimeSpecifiers.set(edge, runtimeSpecifier)
+      }
+      else {
+        runtimeEdits.push({ start: specifier.node.start, end: specifier.node.end, value: JSON.stringify(value) })
+        if (edge) runtimeSpecifiers.set(edge, value)
+      }
+    }
   }
   for (const statement of parsed.program.body) {
     if (!statement || typeof statement !== 'object') continue
@@ -446,7 +571,10 @@ function rebaseProjectedSource(source: string, original: string, generated: stri
     const specifier = node.source.value
     if (typeof specifier !== 'string') continue
     const target = resolveSpecifier(original, specifier, settings)
-    if (target && extname(target) === '.json' && node.source.end != null) edits.push({ start: node.source.end, end: node.source.end, value: ' with { type: "json" }' })
+    if (target && extname(target) === '.json' && node.source.end != null) {
+      edits.push({ start: node.source.end, end: node.source.end, value: ' with { type: "json" }' })
+      runtimeEdits.push({ start: node.source.end, end: node.source.end, value: ' with { type: "json" }' })
+    }
   }
   const addDynamicJsonAttributes = (value: unknown) => {
     if (!value || typeof value !== 'object') return
@@ -463,7 +591,10 @@ function rebaseProjectedSource(source: string, original: string, generated: stri
     const hasOptions = type === 'ImportExpression' ? node.options !== null && node.options !== undefined : (node.arguments as unknown[] | undefined)?.length !== 1
     if (sourceNode && !hasOptions && typeof sourceNode.value === 'string' && sourceNode.end != null) {
       const target = resolveSpecifier(original, sourceNode.value, settings)
-      if (target && extname(target) === '.json') edits.push({ start: sourceNode.end, end: sourceNode.end, value: ', { with: { type: "json" } }' })
+      if (target && extname(target) === '.json') {
+        edits.push({ start: sourceNode.end, end: sourceNode.end, value: ', { with: { type: "json" } }' })
+        runtimeEdits.push({ start: sourceNode.end, end: sourceNode.end, value: ', { with: { type: "json" } }' })
+      }
     }
     Object.values(node).forEach(addDynamicJsonAttributes)
   }
@@ -474,32 +605,43 @@ function rebaseProjectedSource(source: string, original: string, generated: stri
     if (!match?.[1] || comment.start == null || match.index === undefined) continue
     const start = source.indexOf(match[0], comment.start) + match[0].indexOf(match[1])
     const target = resolveSpecifier(original, match[1], settings)
-    if (target) edits.push({ start, end: start + match[1].length, value: sourceReferenceSpecifier(generated, target) })
+    if (target) {
+      const value = sourceReferenceSpecifier(generated, target)
+      edits.push({ start, end: start + match[1].length, value })
+      runtimeEdits.push({ start, end: start + match[1].length, value })
+    }
   }
   const replaced = applyEdits(source, edits)
-  const runtimeEdits = edits.slice()
   const requireName = uniqueIdentifier(parsed.program, '__sprindleRequire')
   const createRequireName = uniqueIdentifier(parsed.program, '__sprindleCreateRequire')
   let hasExternalRequire = false
   for (const specifier of moduleSpecifiers(parsed.program)) {
     if (specifier.kind !== 'require' || specifier.node.start == null || specifier.node.end == null || specifier.callee?.start == null || specifier.callee.end == null) continue
-    let target: string | undefined
-    if (specifier.value.startsWith('.') || pathAlias(specifier.value, settings)) target = resolveSpecifier(original, specifier.value, settings)
+    const edge = graph.importEdges.find((item) => item.importer === resolve(original) && item.specifier === specifier.value && item.position === specifier.node.start)
+    const target = edge?.runtimeTarget ?? edge?.typeTargets[0]
     if (target && projectedModules.has(target)) continue
     const requireSpecifier = target
     if (requireSpecifier) {
       const argumentEdit = runtimeEdits.find((edit) => edit.start === specifier.node.start && edit.end === specifier.node.end)
       if (argumentEdit) argumentEdit.value = JSON.stringify(requireSpecifier)
       else runtimeEdits.push({ start: specifier.node.start, end: specifier.node.end, value: JSON.stringify(requireSpecifier) })
+      if (edge) runtimeSpecifiers.set(edge, requireSpecifier)
     }
     runtimeEdits.push({ start: specifier.callee.start, end: specifier.callee.end, value: requireName })
     hasExternalRequire = true
   }
   const runtimeBody = applyEdits(source, runtimeEdits)
   const runtimePrefix = hasExternalRequire ? `import{createRequire as ${createRequireName}}from'node:module';const ${requireName}=${createRequireName}(import.meta.url);\n` : ''
+  const consumerSpecifierValues = new Map<RouteImportRecord, { specifier: string; position: number }>()
+  for (const [edge, value] of consumerPositions) {
+    const delta = edits.filter((edit) => edit.end <= value.position).reduce((total, edit) => total + edit.value.length - (edit.end - edit.start), 0)
+    consumerSpecifierValues.set(edge, { specifier: value.specifier, position: value.position + delta })
+  }
   return {
     source: `${replaced}${replaced.endsWith('\n') ? '' : '\n'}${sourceMapComment(original, source, generated, edits, parsed.program)}`,
     runtimeSource: `${runtimePrefix}${runtimeBody}${runtimeBody.endsWith('\n') ? '' : '\n'}${sourceMapComment(original, source, generated, runtimeEdits, parsed.program, runtimePrefix ? 1 : 0)}`,
+    consumerSpecifiers: consumerSpecifierValues,
+    runtimeSpecifiers,
   }
 }
 

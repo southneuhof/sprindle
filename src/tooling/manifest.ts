@@ -8,6 +8,7 @@ import { parse } from 'jsonc-parser'
 import { parse as parseTypeScript } from '@babel/parser'
 import { readRouteDirectory } from './route-files.ts'
 import { atomicWriteIfChanged, generatedRuntimePlugin, routeSourceGraph, sourceInputOrigins, stageRouteSource, verifyRouteSourceIdentity, withRouteGenerationLock } from './source.ts'
+import { createRouteResolutionReceipt, externalPackageTarget, isNodeBuiltin, packageManifestForTarget, resolveRuntimeEdges, routeImportPackageSelectionIsValid, type RouteImportRecord, type RuntimeResolutionContext } from './resolution.ts'
 
 const dependencyInputs = new Map<string, string[]>()
 
@@ -43,6 +44,106 @@ async function configInputs(configFile: string, seen = new Set<string>()): Promi
   return [file, ...(await Promise.all(parents.map((parent) => configInputs(parent, seen)))).flat()]
 }
 
+function edgeKind(kind: string) {
+  if (kind === 'dynamic-import') return 'dynamic'
+  if (kind === 'require-call' || kind === 'require-resolve') return 'require'
+  return kind === 'import-statement' ? 'static' : undefined
+}
+
+function outputContainsRequire(code: string, specifier: string) {
+  const program = parseTypeScript(code, { sourceType: 'module', plugins: ['typescript'] }).program
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false
+    if (Array.isArray(value)) return value.some(visit)
+    const node = value as Record<string, unknown>
+    if (node.type === 'CallExpression') {
+      const args = node.arguments as { type?: string; value?: unknown }[] | undefined
+      if (args?.[0]?.type === 'StringLiteral' && args[0].value === specifier) return true
+    }
+    return Object.entries(node).some(([key, child]) => !['loc', 'start', 'end', 'leadingComments', 'trailingComments', 'innerComments', 'comments', 'tokens', 'extra'].includes(key) && visit(child))
+  }
+  return visit(program)
+}
+
+function bundleRuntimeSelections(project: string, runtimeFile: string, generated: Awaited<ReturnType<typeof stageRouteSource>>, sourceGraph: Awaited<ReturnType<typeof routeSourceGraph>>, analysis: Awaited<ReturnType<typeof build>>, sourceMode: boolean) {
+  const inputs = Object.entries(analysis.metafile?.inputs ?? {})
+  const canonical = (file: string) => existingRealPath(file) ?? resolve(file)
+  const inputOrigin = (file: string) => sourceInputOrigins(generated, file) ?? file
+  const observedImporters = new Set(inputs.map(([input]) => canonical(inputOrigin(canonical(isAbsolute(input) ? input : resolve(project, input))))))
+  const outputTarget = (path: string, external: boolean) => {
+    if (external) return path
+    const file = canonical(isAbsolute(path) ? path : resolve(project, path))
+    return canonical(inputOrigin(file))
+  }
+  const observed = inputs.flatMap(([input, value]) => {
+    const file = canonical(isAbsolute(input) ? input : resolve(project, input))
+    const importer = canonical(inputOrigin(file))
+    return value.imports.map((item) => ({ sourceImporter: file, importer, original: item.original, kind: edgeKind(item.kind), target: outputTarget(item.path, Boolean(item.external)), external: Boolean(item.external) }))
+  })
+  const externalEdges: RouteImportRecord[] = []
+  const externalContexts = new Map<RouteImportRecord, RuntimeResolutionContext>()
+  for (const edge of sourceGraph.importEdges) {
+    if (edge.kind === 'type') continue
+    const importer = canonical(edge.importer)
+    const emittedSpecifier = generated.runtimeImportSpecifiers.get(edge) ?? edge.specifier
+    const generatedImporter = edge.consumerSource ? canonical(resolve(generated.directory, edge.consumerSource)) : undefined
+    const outputRelative = sourceMode && edge.runtimeTarget && !edge.runtimeTarget.startsWith('node:')
+      ? relative(canonical(dirname(runtimeFile)), canonical(edge.runtimeTarget)).replaceAll(sep, '/')
+      : undefined
+    const outputSpecifier = outputRelative && !outputRelative.startsWith('../') && !outputRelative.startsWith('./') ? `./${outputRelative}` : outputRelative
+    const emittedSpecifiers = new Set([emittedSpecifier, edge.specifier, outputSpecifier].filter((value): value is string => Boolean(value)))
+    const authored = observed.filter((item) => (generatedImporter ? item.sourceImporter === generatedImporter : item.importer === importer) && item.kind === edge.kind && (emittedSpecifiers.has(item.original ?? '') || emittedSpecifiers.has(item.target)))
+    const selectedTarget = authored.find((item) => !item.external)?.target
+    if (selectedTarget) {
+      edge.runtimeTarget = selectedTarget
+      edge.runtimeEvidence = 'esbuild'
+      if (edge.generatedBinding) edge.packageTarget = false
+      const modeled = edge.typeTargets.filter((target) => !externalPackageTarget(edge.specifier, target))
+      if (modeled.length && !modeled.some((target) => canonical(target) === canonical(selectedTarget))) {
+        throw new Error(`${edge.importer}: API compiler selected ${modeled.join(', ')} for ${edge.specifier}, but esbuild selected ${selectedTarget}.`)
+      }
+      continue
+    }
+    const packageEdge = authored.some((item) => item.external) || isNodeBuiltin(edge.specifier) || edge.packageTarget
+    if (!authored.length && sourceMode && generatedImporter && edge.kind === 'require') {
+      if (!outputContainsRequire(analysis.outputFiles?.[0]?.text ?? '', emittedSpecifier)) throw new Error(`${edge.importer}: generated source output did not retain require ${emittedSpecifier} for ${edge.specifier}.`)
+      externalEdges.push(edge)
+      externalContexts.set(edge, { importer: runtimeFile, specifier: emittedSpecifier })
+      continue
+    }
+    if (packageEdge) {
+      if (!authored.length && sourceMode && !observedImporters.has(importer) && edge.runtimeTarget) continue
+      const emitted = authored.filter((item) => item.external).map((item) => item.target)
+      const specifiers = [...new Set(emitted)]
+      if (specifiers.length !== 1) throw new Error(`${edge.importer}: esbuild did not provide one emitted external import for ${edge.specifier}: ${specifiers.join(', ') || 'none'}.`)
+      externalEdges.push(edge)
+      externalContexts.set(edge, { importer: runtimeFile, specifier: specifiers[0]! })
+      continue
+    }
+    if (!authored.length && sourceMode && !observedImporters.has(importer) && edge.runtimeTarget) continue
+    const expected = [...edge.typeTargets.filter((target) => !externalPackageTarget(edge.specifier, target)), ...(sourceGraph.graphEdgeTargets.get(edge) ? [sourceGraph.graphEdgeTargets.get(edge)!] : [])].map(canonical)
+    const staged = observed.filter((item) => item.importer === importer && item.kind === edge.kind && !item.external && expected.includes(item.target))
+    if (staged.length === 1) {
+      edge.runtimeTarget = staged[0]!.target
+      edge.runtimeEvidence = 'esbuild'
+      continue
+    }
+    throw new Error(`${edge.importer}: esbuild did not provide runtime resolution evidence for ${edge.specifier}: expected ${expected.join(', ') || 'no local target'}; emitted ${emittedSpecifier} from ${generatedImporter ?? importer}; output ${outputSpecifier}; observed ${observed.filter((item) => item.importer === importer).map((item) => `${item.sourceImporter} ${item.original ?? item.target} -> ${item.target} (${item.kind})`).join(', ') || 'no imports'}.`)
+  }
+  return { externalEdges, externalContexts }
+}
+
+async function resolutionInputs(sourceGraph: Awaited<ReturnType<typeof routeSourceGraph>>, configFiles: string[]) {
+  const files = new Set([...sourceGraph.graph.keys(), ...configFiles])
+  for (const edge of sourceGraph.importEdges) {
+    for (const target of [...edge.typeTargets, ...(edge.runtimeTarget && !edge.runtimeTarget.startsWith('node:') ? [edge.runtimeTarget] : [])]) {
+      const manifest = packageManifestForTarget(target)
+      if (manifest) files.add(manifest)
+    }
+  }
+  return new Map(await Promise.all([...files].sort().map(async (file) => [file, sourceGraph.contents.get(file) ?? sourceGraph.settingsInputs.get(file) ?? await readFile(file, 'utf8')] as const)))
+}
+
 export async function compileRouteManifest(projectRoot: string, routesDirectory = 'routes', output = '.sprindle/routes.mjs', bundle = true) {
   return withRouteGenerationLock(projectRoot, () => compileRouteManifestLocked(projectRoot, routesDirectory, output, bundle))
 }
@@ -57,7 +158,7 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
   await mkdir(dirname(target), { recursive: true })
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
   const placeholder = '0'.repeat(64)
-  const sourceGraph = await routeSourceGraph(project, model)
+  const sourceGraph = await routeSourceGraph(project, model, bundle ? 'bundle' : 'source')
   const generated = await stageRouteSource(project, model, sourceGraph)
   let published = false
   try {
@@ -67,10 +168,7 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
     for (const [file, contents] of generated.settingsInputs) if (sourceGraph.settingsInputs.get(file) !== contents) throw new Error(`Sprindle TypeScript config changed during generation: ${relative(project, file)}. Run the route producer again.`)
     if (sourceGraph.settingsInputs.size !== generated.settingsInputs.size) throw new Error('Sprindle TypeScript config inputs changed during generation. Run the route producer again.')
     const configFiles = await configInputs(resolve(project, 'tsconfig.json'))
-    const inputs = [...new Set([...graph.keys(), ...configFiles])].sort()
-    const inputContents = new Map(await Promise.all(inputs.map(async (file) => [file, sourceGraph.contents.get(file) ?? sourceGraph.settingsInputs.get(file) ?? await readFile(file, 'utf8')] as const)))
     const runtimeInputs = [...new Set([...sourceGraph.runtimeInputs, ...configFiles])].sort()
-    const hash = createHash('sha256').update(JSON.stringify([portable, runtimeInputs.map((file) => relative(project, file).replaceAll(sep, '/')), runtimeInputs.map((file) => inputContents.get(file))])).digest('hex')
     dependencyInputs.set(project, runtimeInputs)
     const cycleInputs = Object.fromEntries([...graph.keys()].map((file) => [file, { imports: (sourceGraph.staticGraph.get(file) ?? []).map((path) => ({ path, kind: 'import-statement' })) }]))
     rejectStaticCycles(project, cycleInputs)
@@ -90,9 +188,41 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
       if (!sourceGraph.runtimeInputs.has(origin) && !runtimeOwners.has(canonicalOrigin)) throw new Error(`Sprindle runtime analysis found an untracked runtime input: ${relative(project, origin)}.`)
     }
     if (analysis.outputFiles?.length !== 1 || !analysis.outputFiles[0]) throw new Error('Sprindle runtime build: expected one output file')
+    {
+      const { externalEdges, externalContexts } = bundleRuntimeSelections(project, bundle ? target : runtimeFile, generated, sourceGraph, analysis, !bundle)
+      const externalTargets = await resolveRuntimeEdges(project, externalEdges, sourceGraph.runtimeMode, externalContexts)
+      externalEdges.forEach((edge, index) => {
+        const target = externalTargets.get(index)
+        if (!target) throw new Error(`${edge.importer}: missing Node runtime resolution for ${edge.specifier}.`)
+        edge.runtimeTarget = target
+        edge.runtimeEvidence = 'node'
+        edge.packageTarget ||= !isNodeBuiltin(edge.specifier) && externalPackageTarget(edge.specifier, target)
+      })
+    }
+    for (const edge of sourceGraph.importEdges) {
+      if (edge.kind !== 'type' && !edge.runtimeTarget) throw new Error(`${edge.importer}: missing runtime resolution evidence for ${edge.specifier}.`)
+      if (edge.packageTarget && !routeImportPackageSelectionIsValid(edge, sourceGraph.customConditions, sourceGraph.producerModuleResolution)) {
+        throw new Error(`${edge.importer}: API runtime selected ${edge.runtimeTarget ?? 'unresolved'} and API compiler selected ${edge.typeTargets.join(', ') || 'unresolved'} for ${edge.specifier}, but its declared package mapping does not relate those targets.`)
+      }
+    }
+    const inputContents = await resolutionInputs(sourceGraph, configFiles)
+    dependencyInputs.set(project, [...new Set([...runtimeInputs, ...[...inputContents.keys()].filter((file) => basename(file) === 'package.json')])].sort())
+    const hash = createHash('sha256').update(JSON.stringify([portable, runtimeInputs.map((file) => relative(project, file).replaceAll(sep, '/')), runtimeInputs.map((file) => inputContents.get(file))])).digest('hex')
     const runtime = finalizeBundle(analysis.outputFiles[0].text, provisionalSource, placeholder, hash)
     if (bundle) await writeFile(temporary, runtime)
-    else await generated.addRuntimeFile('routes.mjs', runtime)
+    else await generated.addGeneratedFile('routes.mjs', runtime)
+    const receipt = createRouteResolutionReceipt({
+      producerRoot: project,
+      producerConfig: resolve(project, 'tsconfig.json'),
+      producerCompiler: sourceGraph.producerCompiler,
+      producerModuleResolution: sourceGraph.producerModuleResolution,
+      runtimeMode: sourceGraph.runtimeMode,
+      customConditions: sourceGraph.customConditions,
+      edges: sourceGraph.importEdges,
+      sourceOrigins: [...generated.origins].flatMap(([file, origin]) => file === generated.entryFile ? [] : [{ source: relative(generated.directory, file).replaceAll(sep, '/'), origin }]),
+      inputContents,
+    })
+    await generated.addGeneratedFile('resolution.json', `${JSON.stringify(receipt)}\n`)
     await writeFile(generated.entryFile, generated.manifestSource())
     await verifyRouteSourceIdentity(project, model, generated, inputContents)
     await generated.publish()

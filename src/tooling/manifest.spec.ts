@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
@@ -7,9 +7,10 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { Hono } from 'hono'
 import { build } from 'esbuild'
 import { compileRouteManifest, watchRouteManifest } from './manifest'
+import { verifyRouteImportAgreement } from './resolution'
 import { installSprindle } from '../hono/index.ts'
 
-const filesystemFailure = vi.hoisted(() => ({ failOwnerWrite: false }))
+const filesystemFailure = vi.hoisted(() => ({ failOwnerWrite: false, failPointerRename: false }))
 
 vi.mock('esbuild', async (importOriginal) => {
   const actual = await importOriginal<typeof import('esbuild')>()
@@ -31,6 +32,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (filesystemFailure.failPointerRename && String(args[1]).replaceAll('\\', '/').endsWith('/.sprindle/routes.ts')) {
+        filesystemFailure.failPointerRename = false
+        throw Object.assign(new Error('route pointer rename failed'), { code: 'EIO' })
+      }
+      return actual.rename(...args)
+    },
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
       if (filesystemFailure.failOwnerWrite && String(args[0]).replaceAll('\\', '/').endsWith('/generation.lock/owner.json')) {
         filesystemFailure.failOwnerWrite = false
@@ -42,20 +50,32 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 })
 
 const roots: string[] = []
-function fixture(source = `export const GET = () => 'healthy'`) { const root = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-manifest-')); roots.push(root); mkdirSync(join(root, 'routes', 'health'), { recursive: true }); writeFileSync(join(root, 'tsconfig.json'), '{}'); writeFileSync(join(root, 'routes', 'health', '+server.ts'), source); return root }
+function fixture(source = `export const GET = () => 'healthy'`) { const root = mkdtempSync(join(process.cwd(), 'node_modules', '.sprindle-manifest-')); roots.push(root); mkdirSync(join(root, 'routes', 'health'), { recursive: true }); mkdirSync(join(root, 'node_modules'), { recursive: true }); symlinkSync(resolve(import.meta.dirname, '../../node_modules/typescript'), join(root, 'node_modules/typescript'), 'dir'); symlinkSync(resolve(import.meta.dirname, '../../../../apps/api/node_modules/tsx'), join(root, 'node_modules/tsx'), 'dir'); writeFileSync(join(root, 'tsconfig.json'), '{}'); writeFileSync(join(root, 'routes', 'health', '+server.ts'), source); return root }
+function resolutionRecord(root: string) {
+  const pointer = readFileSync(join(root, '.sprindle', 'routes.ts'), 'utf8')
+  const version = pointer.match(/\.\/source\/([a-f0-9]{64})\/routes/)?.[1]
+  if (!version) throw new Error('Route source pointer does not name an immutable version.')
+  const file = join(root, '.sprindle', 'source', version, 'resolution.json')
+  return { file, receipt: JSON.parse(readFileSync(file, 'utf8')) as { runtimeMode: string; edges: { importer: string; specifier: string; kind: string; typeTargets: string[]; runtimeTarget?: string; runtimeEvidence?: string }[]; inputs: { file: string; digest: string }[] } }
+}
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
 
 test('writes one atomic artifact with file, helper, and extended config inputs', { timeout: 120_000 }, async () => {
-  const root = fixture()
+  const root = fixture(`import { basename } from 'node:path'; export const GET = () => basename('/tmp/healthy')`)
   writeFileSync(join(root, 'config.base.json'), '{"compilerOptions":{"strict":true}}')
   writeFileSync(join(root, 'tsconfig.json'), '{"extends":"./config.base.json"}')
   const [first, second] = await Promise.all([compileRouteManifest(root), compileRouteManifest(root)])
   expect(first).toBe(second)
   const before = await import(`${pathToFileURL(first).href}?before`)
   expect(before.default[0]).toMatchObject({ sourcePath: 'routes/health/+server.ts', httpPath: '/health', methods: ['GET'] })
+  expect(before.default[0].handlers.GET()).toBe('healthy')
+  expect(resolutionRecord(root).receipt.edges).toContainEqual(expect.objectContaining({ specifier: 'node:path', kind: 'static', runtimeTarget: 'node:path', runtimeEvidence: 'node' }))
   writeFileSync(join(root, 'helper.ts'), `export const value='changed'`)
   writeFileSync(join(root, 'routes', 'health', '+server.ts'), `import { value } from '../../helper'; export const POST=()=>value`)
   await compileRouteManifest(root); const after = await import(`${pathToFileURL(first).href}?after`); expect(after.hash).not.toBe(before.hash)
+  const recorded = resolutionRecord(root)
+  expect(recorded.receipt.runtimeMode).toBe('bundle')
+  expect(recorded.receipt.edges).toContainEqual(expect.objectContaining({ importer: join(root, 'routes/health/+server.ts'), specifier: '../../helper', kind: 'static', runtimeTarget: join(root, 'helper.ts'), runtimeEvidence: 'esbuild' }))
   writeFileSync(join(root, 'config.base.json'), '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true}}')
   await compileRouteManifest(root); const configured = await import(`${pathToFileURL(first).href}?configured`); expect(configured.hash).not.toBe(after.hash)
   expect(await import('node:fs/promises').then(({ readFile }) => readFile(first, 'utf8'))).not.toMatch(/typescript\/unstable|@babel\/parser/)
@@ -63,6 +83,179 @@ test('writes one atomic artifact with file, helper, and extended config inputs',
   rmSync(join(root, 'helper.ts'))
   const run = spawnSync(process.execPath, ['--input-type=module', '--eval', `const m=await import(${JSON.stringify(pathToFileURL(first).href)});process.stdout.write(m.default[0].handlers.POST())`], { encoding: 'utf8' })
   expect(run.stderr).toBe(''); expect(run.stdout).toBe('changed')
+})
+
+test('records the runtime package manifest beside a separate @types declaration target', { timeout: 120_000 }, async () => {
+  const root = fixture(`import { value } from '@fixture/legacy'; export const GET = () => value`)
+  const runtimePackage = join(root, 'node_modules', '@fixture', 'legacy')
+  const typesPackage = join(root, 'node_modules', '@types', 'fixture__legacy')
+  mkdirSync(join(runtimePackage, 'runtime'), { recursive: true })
+  mkdirSync(join(runtimePackage, 'alternate'), { recursive: true })
+  mkdirSync(typesPackage, { recursive: true })
+  const runtimeManifest = join(runtimePackage, 'package.json')
+  writeFileSync(runtimeManifest, JSON.stringify({ name: '@fixture/legacy', type: 'module', main: './runtime/index.js' }))
+  writeFileSync(join(runtimePackage, 'runtime', 'index.js'), `export const value = 'runtime'`)
+  writeFileSync(join(runtimePackage, 'alternate', 'index.js'), `export const value = 'alternate'`)
+  writeFileSync(join(typesPackage, 'package.json'), JSON.stringify({ name: '@types/fixture__legacy' }))
+  writeFileSync(join(typesPackage, 'index.d.ts'), `export declare const value: 'typed'`)
+  const target = await compileRouteManifest(root)
+  const generated = await import(`${pathToFileURL(target).href}?legacy-package`)
+  expect(generated.default[0].handlers.GET()).toBe('runtime')
+  const recorded = resolutionRecord(root)
+  const runtimeManifestInput = recorded.receipt.inputs.find(({ file }) => file === realpathSync(runtimeManifest))
+  expect(runtimeManifestInput).toMatchObject({ file: realpathSync(runtimeManifest), digest: expect.stringMatching(/^[a-f0-9]{64}$/) })
+  expect(recorded.receipt.edges).toContainEqual(expect.objectContaining({ specifier: '@fixture/legacy', typeTargets: [join(typesPackage, 'index.d.ts')], runtimeTarget: join(runtimePackage, 'runtime/index.js'), runtimeEvidence: 'node' }))
+  await expect(verifyRouteImportAgreement({ producerRoot: root, consumerRoot: root, consumerConfig: join(root, 'tsconfig.json') })).resolves.toBeUndefined()
+  const results: (Error | undefined)[] = []
+  const watcher = await watchRouteManifest(root, 'routes', (error) => results.push(error), '.sprindle/routes.mjs', false)
+  try {
+    const started = results.length
+    expect(watcher.hasInput(runtimeManifest)).toBe(true)
+    writeFileSync(runtimeManifest, JSON.stringify({ name: '@fixture/legacy', type: 'module', main: './alternate/index.js' }))
+    await vi.waitFor(() => { expect(results.length).toBeGreaterThan(started); expect(results.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    expect(resolutionRecord(root).receipt.edges).toContainEqual(expect.objectContaining({ specifier: '@fixture/legacy', runtimeTarget: join(runtimePackage, 'alternate/index.js'), runtimeEvidence: 'node' }))
+    const refreshed = runTsxFixture(root, 'legacy-package.mts', `const module=await import(${JSON.stringify(`${pathToFileURL(target).href}?legacy-package-watch`)});process.stdout.write(module.default[0].handlers.GET())`)
+    expect(refreshed.status, refreshed.stdout + refreshed.stderr).toBe(0)
+    expect(refreshed.stdout).toBe('alternate')
+  } finally { await watcher.close() }
+})
+
+test('rejects package type and runtime targets from different conditional branches', { timeout: 120_000 }, async () => {
+  const root = fixture(`import { value } from '@fixture/branch';export const GET=()=>value`)
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler' } }))
+  const packageRoot = join(root, 'node_modules', '@fixture', 'branch')
+  mkdirSync(join(packageRoot, 'node'), { recursive: true })
+  mkdirSync(join(packageRoot, 'browser'), { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+    name: '@fixture/branch',
+    type: 'module',
+    exports: { '.': { node: { types: './node/index.d.ts', default: './node/index.js' }, default: { types: './browser/index.d.ts', default: './browser/index.js' } } },
+  }))
+  writeFileSync(join(packageRoot, 'node/index.d.ts'), `export declare const value: string\n`)
+  writeFileSync(join(packageRoot, 'node/index.js'), `export const value='node'\n`)
+  writeFileSync(join(packageRoot, 'browser/index.d.ts'), `export declare const value: string\n`)
+  writeFileSync(join(packageRoot, 'browser/index.js'), `export const value='browser'\n`)
+  await expect(compileRouteManifest(root)).rejects.toThrow(/API runtime selected .*node\/index\.js.*API compiler selected .*browser\/index\.d\.ts.*declared package mapping/s)
+  expect(existsSync(join(root, '.sprindle', 'routes.ts'))).toBe(false)
+})
+
+test('rejects a consumer alias to an unexported declaration in the same type-only package', { timeout: 120_000 }, async () => {
+  const root = fixture(`import { value } from '../../lib/helper';export const GET=()=>value`)
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler' } }))
+  mkdirSync(join(root, 'lib'), { recursive: true })
+  writeFileSync(join(root, 'lib/helper.ts'), `import type {Result} from '@fixture/typing';export const value:Result={value:'api'}\n`)
+  const packageRoot = join(root, 'node_modules', '@fixture', 'typing')
+  mkdirSync(packageRoot, { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@fixture/typing', type: 'module', exports: { '.': { types: './index.d.ts', default: './index.js' } } }))
+  writeFileSync(join(packageRoot, 'index.d.ts'), `export type Result={value:string}\n`)
+  writeFileSync(join(packageRoot, 'other.d.ts'), `export type Result={value:string}\n`)
+  writeFileSync(join(packageRoot, 'index.js'), `export const value='runtime'\n`)
+  await compileRouteManifest(root)
+  const edge = resolutionRecord(root).receipt.edges.find((item) => item.importer === join(root, 'lib/helper.ts') && item.specifier === '@fixture/typing')
+  expect(edge).toMatchObject({ kind: 'type', typeTargets: [realpathSync(join(packageRoot, 'index.d.ts'))] })
+  const consumerRoot = join(root, 'consumer')
+  mkdirSync(consumerRoot, { recursive: true })
+  const consumerConfig = join(consumerRoot, 'tsconfig.json')
+  const writeConsumerConfig = (target: string) => writeFileSync(consumerConfig, JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.', paths: { '@fixture/typing': [target] } } }))
+  writeConsumerConfig(join(packageRoot, 'other.d.ts'))
+  await expect(verifyRouteImportAgreement({ producerRoot: root, consumerRoot, consumerConfig })).rejects.toThrow(/import agreement.*@fixture\/typing.*index\.d\.ts.*other\.d\.ts.*consumer config/s)
+  writeConsumerConfig(join(packageRoot, 'index.d.ts'))
+  await expect(verifyRouteImportAgreement({ producerRoot: root, consumerRoot, consumerConfig })).resolves.toBeUndefined()
+})
+
+test('accepts a legacy package main and types mapping', { timeout: 120_000 }, async () => {
+  const root = fixture(`import { value } from '@fixture/legacy-main';export const GET=()=>value`)
+  const packageRoot = join(root, 'node_modules', '@fixture', 'legacy-main')
+  mkdirSync(join(packageRoot, 'types'), { recursive: true })
+  mkdirSync(join(packageRoot, 'runtime'), { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@fixture/legacy-main', type: 'module', main: './runtime/index.js', types: './types/index.d.ts' }))
+  writeFileSync(join(packageRoot, 'types/index.d.ts'), `export declare const value: string\n`)
+  writeFileSync(join(packageRoot, 'runtime/index.js'), `export const value='legacy'\n`)
+  const target = await compileRouteManifest(root)
+  const edge = resolutionRecord(root).receipt.edges.find((item) => item.specifier === '@fixture/legacy-main')
+  expect(edge?.typeTargets).toEqual([join(packageRoot, 'types/index.d.ts')])
+  expect(edge?.runtimeTarget).toBe(realpathSync(join(packageRoot, 'runtime/index.js')))
+  await expect(verifyRouteImportAgreement({ producerRoot: root, consumerRoot: root, consumerConfig: join(root, 'tsconfig.json') })).resolves.toBeUndefined()
+  const runtime = runTsxFixture(root, 'legacy-main.mts', `const module=await import(${JSON.stringify(pathToFileURL(target).href)});process.stdout.write(module.default[0].handlers.GET())`)
+  expect(runtime.status, runtime.stdout + runtime.stderr).toBe(0)
+  expect(runtime.stdout).toBe('legacy')
+})
+
+test('accepts a consumer source mapping to the API-selected package runtime', { timeout: 120_000 }, async () => {
+  const root = fixture(`import { value } from '@fixture/source';export const GET=()=>value`)
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler' } }))
+  const packageRoot = join(root, 'node_modules', '@fixture', 'source')
+  mkdirSync(join(packageRoot, 'types'), { recursive: true })
+  mkdirSync(join(packageRoot, 'src'), { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@fixture/source', type: 'module', exports: { '.': { types: './types/index.d.ts', default: './src/index.ts' } } }))
+  writeFileSync(join(packageRoot, 'types/index.d.ts'), `export declare const value: string\n`)
+  writeFileSync(join(packageRoot, 'src/index.ts'), `export const value='source'\n`)
+  const target = await compileRouteManifest(root)
+  const edge = resolutionRecord(root).receipt.edges.find((item) => item.specifier === '@fixture/source')
+  expect(edge?.typeTargets).toEqual([join(packageRoot, 'types/index.d.ts')])
+  expect(edge?.runtimeTarget).toBe(realpathSync(join(packageRoot, 'src/index.ts')))
+  const consumerRoot = join(root, 'consumer')
+  mkdirSync(consumerRoot, { recursive: true })
+  const consumerConfig = join(consumerRoot, 'tsconfig.json')
+  writeFileSync(consumerConfig, JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.', paths: { '@fixture/source': ['../node_modules/@fixture/source/src/index.ts'] } } }))
+  await expect(verifyRouteImportAgreement({ producerRoot: root, consumerRoot, consumerConfig })).resolves.toBeUndefined()
+  const runtime = runTsxFixture(root, 'source-package.mts', `const module=await import(${JSON.stringify(pathToFileURL(target).href)});process.stdout.write(module.default[0].handlers.GET())`)
+  expect(runtime.status, runtime.stdout + runtime.stderr).toBe(0)
+  expect(runtime.stdout).toBe('source')
+})
+
+test.each([
+  { bundle: true, projected: false, producerRejects: true },
+  { bundle: false, projected: false, producerRejects: false },
+  { bundle: false, projected: true, producerRejects: true },
+])('checks nested package instances against emitted runtime context with bundle=$bundle and projected=$projected', { timeout: 120_000 }, async ({ bundle, projected, producerRejects }) => {
+  const source = projected
+    ? `import {defineRoute} from '@southneuhof/sprindle';import {value} from '@fixture/value';export const GET=defineRoute({action:()=>value})`
+    : `import {value} from '../../lib/helper';export const GET=()=>value`
+  const root = fixture(source)
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler' } }))
+  mkdirSync(join(root, 'node_modules', '@southneuhof'), { recursive: true })
+  symlinkSync(join(import.meta.dirname, '..', '..'), join(root, 'node_modules', '@southneuhof', 'sprindle'), 'dir')
+  const packageFiles = (packageRoot: string, value: string) => {
+    mkdirSync(join(packageRoot, 'types'), { recursive: true })
+    mkdirSync(join(packageRoot, 'runtime'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@fixture/value', type: 'module', exports: { '.': { types: './types/index.d.ts', default: './runtime/index.js' } } }))
+    writeFileSync(join(packageRoot, 'types/index.d.ts'), `export declare const value: string\n`)
+    writeFileSync(join(packageRoot, 'runtime/index.js'), `export const value=${JSON.stringify(value)}\n`)
+  }
+  packageFiles(join(root, 'node_modules', '@fixture', 'value'), 'root')
+  if (projected) packageFiles(join(root, 'routes', 'health', 'node_modules', '@fixture', 'value'), 'nested')
+  else {
+    packageFiles(join(root, 'lib', 'node_modules', '@fixture', 'value'), 'nested')
+    writeFileSync(join(root, 'lib', 'helper.ts'), `export {value} from '@fixture/value'`)
+  }
+  const output = bundle ? '.sprindle/routes.mjs' : '.sprindle/routes-source.mjs'
+  if (producerRejects) {
+    await expect(compileRouteManifest(root, 'routes', output, bundle)).rejects.toThrow(/declared package mapping does not relate those targets/)
+    expect(existsSync(join(root, '.sprindle', 'routes.ts'))).toBe(false)
+  } else {
+    const target = await compileRouteManifest(root, 'routes', output, bundle)
+    const edge = resolutionRecord(root).receipt.edges.find((item) => item.specifier === '@fixture/value')
+    expect(edge?.runtimeTarget).toBe(realpathSync(join(root, 'lib/node_modules/@fixture/value/runtime/index.js')))
+    await expect(verifyRouteImportAgreement({ producerRoot: root, consumerRoot: root, consumerConfig: join(root, 'tsconfig.json') })).resolves.toBeUndefined()
+    const runtime = runTsxFixture(root, 'nested-package.mts', `const module=await import(${JSON.stringify(pathToFileURL(target).href)});process.stdout.write(module.default[0].handlers.GET())`)
+    expect(runtime.status, runtime.stdout + runtime.stderr).toBe(0)
+    expect(runtime.stdout).toBe('nested')
+  }
+})
+
+test('records the actual require target for an unchanged CommonJS helper in source mode', { timeout: 120_000 }, async () => {
+  const root = fixture(`import { value } from '../../helper.cjs';export const GET=()=>value`)
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }))
+  writeFileSync(join(root, 'helper.cjs'), `exports.value=require('./choice').value`)
+  writeFileSync(join(root, 'choice.js'), `exports.value='javascript'`)
+  writeFileSync(join(root, 'choice.ts'), `export const value='typescript'`)
+  const target = await compileRouteManifest(root, 'routes', '.sprindle/routes-source.mjs', false)
+  const edge = resolutionRecord(root).receipt.edges.find((item) => item.importer === join(root, 'helper.cjs') && item.specifier === './choice')
+  expect(edge).toMatchObject({ kind: 'require', runtimeTarget: realpathSync(join(root, 'choice.js')), runtimeEvidence: 'node' })
+  const runtime = runTsxFixture(root, 'source-require.mts', `const module=await import(${JSON.stringify(pathToFileURL(target).href)});process.stdout.write(module.default[0].handlers.GET())`)
+  expect(runtime.status, runtime.stdout + runtime.stderr).toBe(0)
+  expect(runtime.stdout).toBe('javascript')
 })
 
 test('reclaims stale generation ownership while separate generators wait', { timeout: 120_000 }, async () => {
@@ -319,6 +512,12 @@ test.each([true, false])('tracks JSON, dynamic import, and require inputs throug
   writeFileSync(required, `export const value='require-one'`)
   const output = bundle ? '.sprindle/routes.mjs' : '.sprindle/routes-source.mjs'
   const target = await compileRouteManifest(root, 'routes', output, bundle)
+  const recorded = resolutionRecord(root)
+  expect(recorded.receipt.runtimeMode).toBe(bundle ? 'bundle' : 'source')
+  expect(recorded.receipt.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ specifier: '../../external', kind: 'dynamic', runtimeTarget: dynamic, runtimeEvidence: bundle ? 'esbuild' : 'node' }),
+    expect.objectContaining({ specifier: '../../required', kind: 'require', runtimeTarget: required, runtimeEvidence: bundle ? 'esbuild' : 'node' }),
+  ]))
   let load = 0
   const request = async () => {
     if (!bundle) {
@@ -443,15 +642,28 @@ test('a cycle failure preserves output and watch mode recovers after removal', {
   const root = dependencyFixture({ 'shared.ts': `export const value='ok'`, 'routes/health/+server.ts': `import {value} from '../../shared';export const GET=()=>value` })
   const target = await compileRouteManifest(root)
   const sourcePointer = join(root, '.sprindle', 'routes.ts')
-  const before = [readFileSync(target, 'utf8'), readFileSync(sourcePointer, 'utf8')]
+  const publishedReceipt = resolutionRecord(root)
+  const before = [readFileSync(target, 'utf8'), readFileSync(sourcePointer, 'utf8'), readFileSync(publishedReceipt.file, 'utf8')]
   writeFileSync(join(root, 'shared.ts'), `import {GET} from './routes/health/+server';export const value=GET`)
   await expect(compileRouteManifest(root)).rejects.toThrow(/Static local import cycle/)
-  expect([readFileSync(target, 'utf8'), readFileSync(sourcePointer, 'utf8')]).toEqual(before)
+  expect([readFileSync(target, 'utf8'), readFileSync(sourcePointer, 'utf8'), readFileSync(publishedReceipt.file, 'utf8')]).toEqual(before)
   const results: (Error | undefined)[] = []; const watcher = await watchRouteManifest(root, 'routes', (error) => results.push(error))
   try {
     writeFileSync(join(root, 'shared.ts'), `export const value='fixed'`)
     await vi.waitFor(() => { expect(results.some(Boolean)).toBe(true); expect(results.at(-1)).toBeUndefined() }, { timeout: 30_000 })
   } finally { await watcher.close() }
+})
+
+test('restores the previous runtime and receipt when pointer publication fails', async () => {
+  const root = fixture()
+  const target = await compileRouteManifest(root)
+  const pointer = join(root, '.sprindle', 'routes.ts')
+  const published = resolutionRecord(root)
+  const before = [readFileSync(target, 'utf8'), readFileSync(pointer, 'utf8'), readFileSync(published.file, 'utf8')]
+  writeFileSync(join(root, 'routes', 'health', '+server.ts'), `export const GET = () => 'changed'`)
+  filesystemFailure.failPointerRename = true
+  await expect(compileRouteManifest(root)).rejects.toThrow('route pointer rename failed')
+  expect([readFileSync(target, 'utf8'), readFileSync(pointer, 'utf8'), readFileSync(published.file, 'utf8')]).toEqual(before)
 })
 
 test('watch follows an atomic replacement of an external input', { timeout: 120_000 }, async () => {
@@ -510,6 +722,8 @@ test('bundled scope and resource helpers execute after route source is removed',
 test('builds both runtime modes with one bundler pass', { timeout: 120_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'sprindle-dual-manifest-')); roots.push(root)
   mkdirSync(join(root, 'routes', 'health'), { recursive: true })
+  mkdirSync(join(root, 'node_modules'), { recursive: true })
+  symlinkSync(resolve(import.meta.dirname, '../../../../apps/api/node_modules/tsx'), join(root, 'node_modules/tsx'), 'dir')
   writeFileSync(join(root, 'tsconfig.json'), '{}')
   writeFileSync(join(root, 'routes', 'health', '+server.ts'), `export const GET = () => 'healthy'`)
   writeFileSync(join(root, 'config.base.json'), '{"compilerOptions":{"strict":true}}')
@@ -609,6 +823,7 @@ test.each([true, false])('maps the original column after a longer generated impo
   const root = existsSync(rootAlias) && realpathSync(rootAlias) === realRoot ? rootAlias : createdRoot
   mkdirSync(join(root, 'routes', 'health'), { recursive: true })
   mkdirSync(join(root, 'node_modules', '@southneuhof'), { recursive: true })
+  symlinkSync(resolve(import.meta.dirname, '../../../../apps/api/node_modules/tsx'), join(root, 'node_modules/tsx'), 'dir')
   symlinkSync(join(import.meta.dirname, '..', '..'), join(root, 'node_modules', '@southneuhof', 'sprindle'), 'dir')
   mkdirSync(join(root, 'shared'))
   writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'ESNext', moduleResolution: 'Bundler', paths: { '@shared/*': ['./shared/*'] } } }))
