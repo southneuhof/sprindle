@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { fork } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import chokidar, { type FSWatcher } from 'chokidar'
 import { build } from 'esbuild'
 import { parse } from 'jsonc-parser'
@@ -9,8 +11,33 @@ import { parse as parseTypeScript } from '@babel/parser'
 import { readRouteDirectory } from './route-files.ts'
 import { atomicWriteIfChanged, generatedRuntimePlugin, routeSourceGraph, sourceInputOrigins, stageRouteSource, verifyRouteSourceIdentity, withRouteGenerationLock } from './source.ts'
 import { createRouteResolutionReceipt, externalPackageTarget, isNodeBuiltin, packageManifestForTarget, resolveRuntimeEdges, routeImportPackageSelectionIsValid, type RouteImportRecord, type RuntimeResolutionContext } from './resolution.ts'
+import { stopOwnedProcessTree } from './process.ts'
 
 const dependencyInputs = new Map<string, string[]>()
+const defaultGenerationTimeoutMs = 120_000
+const generationStopGraceMs = 2_500
+const generationStopWaitMs = 1_500
+
+export type WatchRouteManifestOptions = {
+  signal?: AbortSignal
+  generationTimeoutMs?: number
+}
+
+export type GenerationRequest = {
+  projectRoot: string
+  routesDirectory: string
+  output: string
+  bundle: boolean
+  dependencyInputs: string[]
+}
+
+type GenerationFailure = Error & { dependencyInputs?: string[]; stopFailed?: boolean }
+type GenerationResult = { target: string; dependencyInputs: string[] }
+type WorkerError = { message: string; stack?: string }
+type WorkerMessage =
+  | { type: 'dependencies'; dependencyInputs: string[] }
+  | { type: 'result'; ok: true; target: string; dependencyInputs: string[] }
+  | { type: 'result'; ok: false; error: WorkerError; dependencyInputs: string[] }
 
 function rejectStaticCycles(projectRoot: string, inputs: Record<string, { imports: { path: string; kind: string; external?: boolean }[] }>) {
   const graph = new Map(Object.entries(inputs).map(([file, input]) => [file, input.imports.filter((entry) => entry.kind === 'import-statement' && !entry.external && inputs[entry.path]).map((entry) => entry.path).sort()]))
@@ -148,7 +175,32 @@ export async function compileRouteManifest(projectRoot: string, routesDirectory 
   return withRouteGenerationLock(projectRoot, () => compileRouteManifestLocked(projectRoot, routesDirectory, output, bundle))
 }
 
-async function compileRouteManifestLocked(projectRoot: string, routesDirectory: string, output: string, bundle: boolean) {
+export async function runRouteManifestGeneration(request: GenerationRequest, onDependencyInputs: (inputs: string[]) => void, signal?: AbortSignal) {
+  const project = resolve(request.projectRoot)
+  dependencyInputs.set(project, [...request.dependencyInputs])
+  const updateInputs = (inputs: string[]) => {
+    const current = [...new Set(inputs)].sort()
+    dependencyInputs.set(project, current)
+    onDependencyInputs(current)
+  }
+  const assertConnected = () => {
+    if (!process.connected || signal?.aborted) throw new Error(`Route manifest generation parent disconnected for ${request.output} in ${project}.`)
+  }
+  try {
+    const target = await withRouteGenerationLock(project, () => compileRouteManifestLocked(project, request.routesDirectory, request.output, request.bundle, assertConnected, updateInputs, signal))
+    return { type: 'result', ok: true as const, target, dependencyInputs: dependencyInputs.get(project) ?? request.dependencyInputs }
+  } catch (error) {
+    return {
+      type: 'result',
+      ok: false as const,
+      error: { message: error instanceof Error ? error.message : String(error), ...(error instanceof Error && error.stack ? { stack: error.stack } : {}) },
+      dependencyInputs: dependencyInputs.get(project) ?? request.dependencyInputs,
+    }
+  }
+}
+
+async function compileRouteManifestLocked(projectRoot: string, routesDirectory: string, output: string, bundle: boolean, assertActive: () => void = () => {}, onDependencyInputs?: (inputs: string[]) => void, signal?: AbortSignal) {
+  assertActive()
   const project = resolve(projectRoot)
   const root = resolve(projectRoot, routesDirectory)
   const model = await readRouteDirectory(root)
@@ -170,6 +222,7 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
     const configFiles = await configInputs(resolve(project, 'tsconfig.json'))
     const runtimeInputs = [...new Set([...sourceGraph.runtimeInputs, ...configFiles])].sort()
     dependencyInputs.set(project, runtimeInputs)
+    onDependencyInputs?.(runtimeInputs)
     const cycleInputs = Object.fromEntries([...graph.keys()].map((file) => [file, { imports: (sourceGraph.staticGraph.get(file) ?? []).map((path) => ({ path, kind: 'import-statement' })) }]))
     rejectStaticCycles(project, cycleInputs)
     const runtimeFile = bundle ? target : resolve(generated.directory, 'routes.mjs')
@@ -190,7 +243,7 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
     if (analysis.outputFiles?.length !== 1 || !analysis.outputFiles[0]) throw new Error('Sprindle runtime build: expected one output file')
     {
       const { externalEdges, externalContexts } = bundleRuntimeSelections(project, bundle ? target : runtimeFile, generated, sourceGraph, analysis, !bundle)
-      const externalTargets = await resolveRuntimeEdges(project, externalEdges, sourceGraph.runtimeMode, externalContexts)
+      const externalTargets = await resolveRuntimeEdges(project, externalEdges, sourceGraph.runtimeMode, externalContexts, signal)
       externalEdges.forEach((edge, index) => {
         const target = externalTargets.get(index)
         if (!target) throw new Error(`${edge.importer}: missing Node runtime resolution for ${edge.specifier}.`)
@@ -206,7 +259,9 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
       }
     }
     const inputContents = await resolutionInputs(sourceGraph, configFiles)
-    dependencyInputs.set(project, [...new Set([...runtimeInputs, ...[...inputContents.keys()].filter((file) => basename(file) === 'package.json')])].sort())
+    const finalInputs = [...new Set([...runtimeInputs, ...[...inputContents.keys()].filter((file) => basename(file) === 'package.json')])].sort()
+    dependencyInputs.set(project, finalInputs)
+    onDependencyInputs?.(finalInputs)
     const hash = createHash('sha256').update(JSON.stringify([portable, runtimeInputs.map((file) => relative(project, file).replaceAll(sep, '/')), runtimeInputs.map((file) => inputContents.get(file))])).digest('hex')
     const runtime = finalizeBundle(analysis.outputFiles[0].text, provisionalSource, placeholder, hash)
     if (bundle) await writeFile(temporary, runtime)
@@ -225,14 +280,18 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
     await generated.addGeneratedFile('resolution.json', `${JSON.stringify(receipt)}\n`)
     await writeFile(generated.entryFile, generated.manifestSource())
     await verifyRouteSourceIdentity(project, model, generated, inputContents)
+    assertActive()
     await generated.publish()
+    assertActive()
     const sourcePointer = resolve(project, '.sprindle', 'routes.ts')
     const previousPointer = existsSync(sourcePointer) ? readFileSync(sourcePointer, 'utf8') : undefined
     const previousRuntime = existsSync(target) ? readFileSync(target, 'utf8') : undefined
     const runtimeSource = bundle ? runtime : sourceRuntimePointer(target, resolve(generated.versionDirectory, 'routes.mjs'), hash)
+    assertActive()
     await atomicWriteIfChanged(target, runtimeSource)
     try {
       await atomicWriteIfChanged(sourcePointer, generated.pointerSource(hash))
+      assertActive()
     } catch (error) {
       if (previousRuntime === undefined) await rm(target, { force: true })
       else await atomicWriteIfChanged(target, previousRuntime)
@@ -341,9 +400,138 @@ function containedRelativePathOrUndefined(root: string, file: string) {
   return isAbsolute(path) || path.split(sep).includes('..') ? undefined : path
 }
 
-export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true) {
-  let queue = Promise.resolve(), timer: ReturnType<typeof setTimeout> | undefined, closed = false
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function watchSupervisorPath() {
+  const source = import.meta.url.endsWith('.ts')
+  return { file: fileURLToPath(new URL(source ? './generation-supervisor.ts' : './generation-supervisor.js', import.meta.url)), source }
+}
+
+function runWatcherGeneration(request: GenerationRequest, timeoutMs: number, signal?: AbortSignal) {
+  const project = resolve(request.projectRoot)
+  const target = resolve(project, request.output)
+  const supervisor = watchSupervisorPath()
+  const child = fork(supervisor.file, [], {
+    cwd: project,
+    detached: process.platform !== 'win32',
+    execArgv: supervisor.source ? ['--experimental-strip-types'] : [],
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  })
+  let output = '', response: Extract<WorkerMessage, { type: 'result' }> | undefined, stopReason: Error | undefined, stopTask: Promise<void> | undefined, disconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let settled = false
+  let resolveGeneration!: (result: GenerationResult) => void
+  let rejectGeneration!: (error: Error) => void
+  const promise = new Promise<GenerationResult>((resolvePromise, rejectPromise) => {
+    resolveGeneration = resolvePromise
+    rejectGeneration = rejectPromise
+  })
+  const timeoutError = () => {
+    const error = new Error(`Route manifest generation timed out after ${timeoutMs} ms for ${target} in ${project}; its owned process tree was stopped.`) as GenerationFailure
+    error.dependencyInputs = dependencyInputs.get(project)
+    return error
+  }
+  const settle = (error?: Error, result?: GenerationResult) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    if (disconnectTimer) clearTimeout(disconnectTimer)
+    signal?.removeEventListener('abort', abort)
+    if (error) rejectGeneration(error)
+    else resolveGeneration(result!)
+  }
+  const stop = (reason: Error) => {
+    if (stopTask) return stopTask
+    stopReason = reason
+    stopTask = (async () => {
+      try {
+        await stopOwnedProcessTree(child, generationStopGraceMs, generationStopWaitMs)
+        settle(reason)
+      } catch (error) {
+        const failure = new AggregateError([reason, error], `Route manifest generation could not stop its owned process tree for ${target} in ${project}.`) as GenerationFailure
+        failure.dependencyInputs = dependencyInputs.get(project)
+        failure.stopFailed = true
+        settle(failure)
+        throw failure
+      }
+    })()
+    return stopTask
+  }
+  const abort = () => {
+    const error = new Error(`Route manifest generation cancelled for ${target} in ${project}.`, { cause: signal?.reason })
+    void stop(error).catch(() => {})
+  }
+  const timer = setTimeout(() => { void stop(timeoutError()).catch(() => {}) }, timeoutMs)
+  child.stderr?.on('data', (chunk: Buffer) => { output = `${output}${chunk.toString('utf8')}`.slice(-65_536) })
+  child.once('error', (error) => settle(new Error(`Route manifest generation could not start for ${target} in ${project}.`, { cause: error })))
+  child.on('message', (message: unknown) => {
+    if (!message || typeof message !== 'object') return
+    const value = message as Partial<WorkerMessage>
+    if (value.type === 'dependencies' && isStringArray(value.dependencyInputs)) {
+      dependencyInputs.set(project, value.dependencyInputs)
+      return
+    }
+    if (value.type !== 'result' || !isStringArray(value.dependencyInputs)) return
+    if (value.ok === true && typeof value.target === 'string') {
+      dependencyInputs.set(project, value.dependencyInputs)
+      response = value as Extract<WorkerMessage, { type: 'result' }>
+      return
+    }
+    if (value.ok === false && value.error && typeof value.error === 'object' && typeof value.error.message === 'string') {
+      dependencyInputs.set(project, value.dependencyInputs)
+      response = value as Extract<WorkerMessage, { type: 'result' }>
+      return
+    }
+    void stop(new Error(`Route manifest generation returned an invalid result for ${target} in ${project}.`)).catch(() => {})
+  })
+  child.once('disconnect', () => {
+    disconnectTimer = setTimeout(() => {
+      if (!response && !stopReason && !settled) void stop(new Error(`Route manifest generation disconnected before returning a result for ${target} in ${project}.`)).catch(() => {})
+    }, 25)
+  })
+  child.once('close', (code, exitSignal) => {
+    if (stopReason) return
+    if (!response) {
+      settle(new Error(`Route manifest generation exited without a result for ${target} in ${project} (${exitSignal ?? code ?? 'unknown'}).${output ? `\n${output}` : ''}`))
+      return
+    }
+    if (response.ok) {
+      settle(undefined, { target: response.target, dependencyInputs: response.dependencyInputs })
+      return
+    }
+    const error = new Error(`Route manifest generation failed for ${target} in ${project}: ${response.error.message}`) as GenerationFailure
+    error.dependencyInputs = response.dependencyInputs
+    if (response.error.stack) error.stack = `${error.stack}\n${response.error.stack}`
+    settle(error)
+  })
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) abort()
+  else child.send(request, (error) => {
+    if (error) void stop(new Error(`Route manifest generation could not send its request for ${target} in ${project}.`, { cause: error })).catch(() => {})
+  })
+  return { promise, stop, child }
+}
+
+function validatedGenerationTimeout(options: WatchRouteManifestOptions) {
+  const timeout = options.generationTimeoutMs ?? defaultGenerationTimeoutMs
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 600_000) throw new RangeError('The route generation timeout must be an integer from 1 to 600000 milliseconds.')
+  return timeout
+}
+
+export async function watchRouteManifest(projectRoot: string, routesDirectory = 'routes', onResult?: (error?: Error) => void, output = '.sprindle/routes.mjs', bundle = true, options: WatchRouteManifestOptions = {}) {
+  const timeoutMs = validatedGenerationTimeout(options)
+  const signal = options.signal
   const project = resolve(projectRoot), routesRoot = resolve(project, routesDirectory)
+  const outputPath = resolve(project, output)
+  const abortError = () => new Error(`Route manifest watcher startup cancelled for ${outputPath} in ${project}.`, { cause: signal?.reason })
+  if (signal?.aborted) throw abortError()
+  let queue = Promise.resolve(), timer: ReturnType<typeof setTimeout> | undefined, closed = false
+  let activeGeneration: ReturnType<typeof runWatcherGeneration> | undefined
+  let terminalError: Error | undefined, terminalClose: Promise<void> | undefined
+  let closePromise: Promise<void> | undefined
+  let resolveClosed!: () => void
+  const closedSignal = new Promise<void>((resolveClosedSignal) => { resolveClosed = resolveClosedSignal })
   const routePathIgnored = (root: string, file: string) => {
     const path = relative(root, file).replaceAll(sep, '/')
     if (!path || path === '.') return false
@@ -378,11 +566,8 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     }
     for (const input of dependencyInputs.get(project) ?? []) {
       if (containedRelativePathOrUndefined(routesRoot, input) !== undefined) continue
-      let real = input
-      try { real = realpathSync(input) } catch { /* keep the recorded input path */ }
+      const real = existingRealPath(input) ?? input
       if (containedRelativePathOrUndefined(routesRoot, real) !== undefined) continue
-      // Track the recorded and real paths. A symlinked parent reports events
-      // in either form, and a deleted file has no real path to resolve.
       track(input)
       if (real !== input) track(real)
     }
@@ -398,6 +583,10 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
   }
   const hasInput = (file: string) => routeInputMatches(file) || externalMatches(file)
   let routeWatcher: FSWatcher | undefined, dependencyWatcher: FSWatcher | undefined
+  const waitForReady = async (ready: Promise<void>) => {
+    if (closed) throw abortError()
+    await Promise.race([ready, closedSignal.then(() => { throw abortError() })])
+  }
   const watchReady = (watcher: FSWatcher) => new Promise<void>((resolveReady, rejectReady) => {
     let ready = false
     const onReady = () => { ready = true; resolveReady() }
@@ -415,17 +604,47 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
   }
   const compile = () => {
     if (closed) return
-    queue = queue.then(() => compileRouteManifest(projectRoot, routesDirectory, output, bundle).then(async () => {
+    queue = queue.then(async () => {
       if (closed) return
-      refreshExternalInputs()
-      if (routeWatcher) await replaceDependencyWatcher()
-      if (!closed) onResult?.()
-    }, async (error: Error) => {
-      if (closed) return
+      const generation = runWatcherGeneration({
+        projectRoot: project,
+        routesDirectory,
+        output,
+        bundle,
+        dependencyInputs: dependencyInputs.get(project) ?? [],
+      }, timeoutMs, signal)
+      activeGeneration = generation
+      let error: Error | undefined
+      try {
+        const result = await generation.promise
+        dependencyInputs.set(project, result.dependencyInputs)
+      } catch (caught) {
+        error = caught instanceof Error ? caught : new Error(String(caught))
+        const failure = error as GenerationFailure
+        if (failure.dependencyInputs) dependencyInputs.set(project, failure.dependencyInputs)
+        if (failure.stopFailed) {
+          terminalError = error
+          closed = true
+          if (timer) { clearTimeout(timer); timer = undefined }
+          signal?.removeEventListener('abort', onAbort)
+          const route = routeWatcher, dependency = dependencyWatcher
+          routeWatcher = undefined
+          dependencyWatcher = undefined
+          const closeTask = Promise.all([route?.close(), dependency?.close()].filter((close): close is Promise<void> => close !== undefined)).then(() => undefined)
+          terminalClose = closeTask
+          void closeTask.catch((closeError) => onResult?.(closeError instanceof Error ? closeError : new Error(String(closeError))))
+        }
+      } finally {
+        if (activeGeneration === generation) activeGeneration = undefined
+      }
+      if (closed) {
+        if ((error as GenerationFailure | undefined)?.stopFailed) onResult?.(error)
+        return
+      }
       refreshExternalInputs()
       if (routeWatcher) await replaceDependencyWatcher()
       if (!closed) onResult?.(error)
-    }))
+    })
   }
   const replaceDependencyWatcher = async () => {
     const wanted = externalWatchDirectories()
@@ -439,7 +658,7 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     if (current.length === wanted.length && current.every((directory) => externalWatchFiles.has(directory))) return
     const old = dependencyWatcher
     const { candidate, ready } = startDependencyWatcher(wanted)
-    try { await ready } catch {
+    try { await waitForReady(ready) } catch {
       await candidate.close().catch(() => {})
       return
     }
@@ -448,39 +667,59 @@ export async function watchRouteManifest(projectRoot: string, routesDirectory = 
     if (old) await old.close()
   }
   const schedule = () => { if (closed) return; if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = undefined; compile() }, 100) }
-  compile(); await queue
-  refreshExternalInputs()
-  routeWatcher = chokidar.watch(routesRoot, { ignoreInitial: true, disableGlobbing: true, ignored: routeIgnored })
-  const routeReady = watchReady(routeWatcher)
-  let routeIsReady = false
-  routeWatcher.on('ready', () => { routeIsReady = true })
-  routeWatcher.on('all', () => { if (!routeIsReady || closed) return; schedule() })
-  const initial = externalWatchDirectories()
-  if (initial.length > 0) {
-    const { candidate, ready } = startDependencyWatcher(initial)
-    try {
-      await Promise.all([routeReady, ready])
-      if (closed) { await candidate.close(); routeWatcher = undefined }
-      else dependencyWatcher = candidate
-    } catch (error) {
-      await candidate.close().catch(() => {})
-      const failed = routeWatcher
-      routeWatcher = undefined
-      if (failed) await failed.close().catch(() => {})
-      throw error
-    }
-  } else await routeReady
-  return {
-    hasInput,
-    close: async () => {
-      closed = true
-      if (timer) { clearTimeout(timer); timer = undefined }
-      const route = routeWatcher, dependency = dependencyWatcher
-      routeWatcher = undefined
-      dependencyWatcher = undefined
-      const closes = [route?.close(), dependency?.close()].filter((close) => close !== undefined)
-      await queue
-      await Promise.all(closes)
-    },
+  const close = () => {
+    if (closePromise) return closePromise
+    closed = true
+    resolveClosed()
+    if (timer) { clearTimeout(timer); timer = undefined }
+    signal?.removeEventListener('abort', onAbort)
+    const route = routeWatcher, dependency = dependencyWatcher
+    const active = activeGeneration
+    routeWatcher = undefined
+    dependencyWatcher = undefined
+    const cancellation = new Error(`Route manifest watcher closed for ${outputPath} in ${project}.`)
+    const tasks = [active?.stop(cancellation), route?.close(), dependency?.close(), terminalClose, terminalError ? Promise.reject(terminalError) : undefined, queue].filter((task): task is Promise<void> => task !== undefined)
+    closePromise = Promise.allSettled(tasks).then((results) => {
+      const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
+      if (failures.length) throw new AggregateError(failures, `Route manifest watcher could not close cleanly for ${outputPath} in ${project}.`)
+    })
+    return closePromise
   }
+  const onAbort = () => {
+    void close().catch((error) => onResult?.(error instanceof Error ? error : new Error(String(error))))
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) onAbort()
+  try {
+    compile()
+    await waitForReady(queue)
+    if (closed) throw abortError()
+    refreshExternalInputs()
+    routeWatcher = chokidar.watch(routesRoot, { ignoreInitial: true, disableGlobbing: true, ignored: routeIgnored })
+    const routeReady = watchReady(routeWatcher)
+    let routeIsReady = false
+    routeWatcher.on('ready', () => { routeIsReady = true })
+    routeWatcher.on('all', () => { if (!routeIsReady || closed) return; schedule() })
+    const initial = externalWatchDirectories()
+    if (initial.length > 0) {
+      const { candidate, ready } = startDependencyWatcher(initial)
+      try {
+        await waitForReady(Promise.all([routeReady, ready]).then(() => undefined))
+        if (closed) { await candidate.close(); routeWatcher = undefined }
+        else dependencyWatcher = candidate
+      } catch (error) {
+        await candidate.close().catch(() => {})
+        const failed = routeWatcher
+        routeWatcher = undefined
+        if (failed) await failed.close().catch(() => {})
+        throw error
+      }
+    } else await waitForReady(routeReady)
+    if (closed) throw abortError()
+  } catch (error) {
+    await close()
+    if (signal?.aborted) throw abortError()
+    throw error
+  }
+  return { hasInput, close }
 }

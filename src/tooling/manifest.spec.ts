@@ -694,6 +694,7 @@ test('watch recovers when an external cycle is fixed by an external edit', { tim
   const watcher = await watchRouteManifest(root, 'routes', (error) => results.push(error))
   try {
     expect(results.at(-1)).toBeInstanceOf(Error)
+    expect(watcher.hasInput(join(base, 'shared/b.ts'))).toBe(true)
     const count = results.length
     writeFileSync(join(base, 'shared', 'b.ts'), `export const b='fixed'`)
     await vi.waitFor(() => { expect(results.length).toBeGreaterThan(count); expect(results.at(-1)).toBeUndefined() }, { timeout: 30_000 })

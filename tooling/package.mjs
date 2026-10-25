@@ -125,6 +125,8 @@ async function prepare() {
       check: join(root, 'tooling/check.mjs'),
       dev: join(root, 'tooling/dev.mjs'),
       'language-server': join(root, 'tooling/language-server.mjs'),
+      'generation-supervisor': join(root, 'src/tooling/generation-supervisor.ts'),
+      'generation-worker': join(root, 'src/tooling/generation-worker.ts'),
       index: join(root, 'src/tooling/index.ts'),
     }
     await build({

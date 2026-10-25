@@ -1,10 +1,11 @@
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { builtinModules, createRequire } from 'node:module'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
+import { stopOwnedProcessTree } from './process.ts'
 
 export type RouteImportKind = 'static' | 'dynamic' | 'require' | 'type'
 
@@ -392,7 +393,7 @@ export function routeImportPackageSelectionIsValid(edge: RouteImportRecord, cust
   return packageSelectionIsRelated(edge, customConditions, moduleResolution)?.valid === true
 }
 
-export async function resolveRuntimeEdges(projectRoot: string, edges: RouteImportRecord[], runtimeMode: 'bundle' | 'source', contexts: Map<RouteImportRecord, RuntimeResolutionContext> = new Map()) {
+export async function resolveRuntimeEdges(projectRoot: string, edges: RouteImportRecord[], runtimeMode: 'bundle' | 'source', contexts: Map<RouteImportRecord, RuntimeResolutionContext> = new Map(), signal?: AbortSignal) {
   const requests: RuntimeRequest[] = edges.map((edge, id) => {
     const context = contexts.get(edge)
     const importer = physicalPath(context?.importer ?? edge.importer)
@@ -401,10 +402,72 @@ export async function resolveRuntimeEdges(projectRoot: string, edges: RouteImpor
   if (!requests.length) return new Map<number, string>()
   const source = `import { registerHooks, createRequire } from 'node:module';import { fileURLToPath, pathToFileURL } from 'node:url';import { readFileSync } from 'node:fs';const input=JSON.parse(readFileSync(0,'utf8'));const result=[];registerHooks({resolve(specifier,context,nextResolve){if(!specifier.startsWith('sprindle-resolution:'))return nextResolve(specifier,context);const id=Number(specifier.slice('sprindle-resolution:'.length));const item=input[id];try{let target;if(item.kind==='require'){target=createRequire(fileURLToPath(item.parentURL)).resolve(item.specifier);if(target.startsWith('node:')){}else if(!target.startsWith('file:'))target=pathToFileURL(target).href}else{target=nextResolve(item.specifier,{...context,parentURL:item.parentURL}).url}result[id]={target:target.startsWith('file:')?fileURLToPath(target):target}}catch(error){result[id]={error:error.code??error.message}}return{url:'file:///sprindle-resolution-probe',shortCircuit:true}}});for(const item of input)await import.meta.resolve('sprindle-resolution:'+item.id);process.stdout.write(JSON.stringify(result))`
   const args = runtimeMode === 'source' ? ['--import', 'tsx', '--input-type=module', '-e', source] : ['--input-type=module', '-e', source]
-  const result = spawnSync(process.execPath, args, { cwd: projectRoot, encoding: 'utf8', input: JSON.stringify(requests), maxBuffer: 16 * 1024 * 1024 })
-  if (result.error || result.status !== 0) throw new Error(`Node runtime resolution failed in ${projectRoot}: ${result.stderr || result.error?.message || result.status}`)
+  const timeoutMs = 30_000
+  const context = requests.slice(0, 5).map((request) => `${request.importer} -> ${request.specifier}`).join('; ')
+  if (signal?.aborted) throw new Error(`Node runtime resolution cancelled in ${projectRoot} for ${context}.`, { cause: signal.reason })
+  const child = spawn(process.execPath, args, { cwd: projectRoot, stdio: ['pipe', 'pipe', 'pipe'] })
+  const result = await new Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; overflow: boolean }>((resolveResult, rejectResult) => {
+    const stdout: Buffer[] = [], stderr: Buffer[] = []
+    let total = 0, overflow = false, stopReason: Error | undefined, stopTask: Promise<void> | undefined
+    let closed: { status: number | null; signal: NodeJS.Signals | null } | undefined
+    let settled = false
+    const settleError = (error: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      rejectResult(error)
+    }
+    const finish = () => {
+      if (!closed || settled) return
+      if (stopReason) {
+        if (!stopTask) return
+        void stopTask.then(() => settleError(stopReason!), (error) => settleError(new AggregateError([stopReason!, error], `Node runtime resolution could not stop its owned process tree for ${projectRoot}.`)))
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      const output = { status: closed.status, signal: closed.signal, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), overflow }
+      resolveResult(output)
+    }
+    const stop = (reason: Error) => {
+      if (stopTask) return stopTask
+      stopReason = reason
+      stopTask = stopOwnedProcessTree(child, 250, 1000, false)
+      void stopTask.then(finish, (error) => settleError(new AggregateError([reason, error], `Node runtime resolution could not stop its owned process tree for ${projectRoot}.`)))
+      finish()
+      return stopTask
+    }
+    const timeoutError = () => new Error(`Node runtime resolution timed out after ${timeoutMs} ms in ${projectRoot} for ${context}${requests.length > 5 ? ` and ${requests.length - 5} more imports` : ''}.`)
+    const abort = () => { void stop(new Error(`Node runtime resolution cancelled in ${projectRoot} for ${context}.`, { cause: signal?.reason })).catch(() => {}) }
+    const collect = (target: Buffer[], chunk: Buffer) => {
+      total += chunk.length
+      if (total > 16 * 1024 * 1024) overflow = true
+      else target.push(chunk)
+    }
+    const timer = setTimeout(() => { void stop(timeoutError()).catch(() => {}) }, timeoutMs)
+    child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk))
+    child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk))
+    child.stdin.on('error', (error) => {
+      if (!settled) void stop(new Error(`Node runtime resolution could not send its request in ${projectRoot} for ${context}.`, { cause: error })).catch(() => {})
+    })
+    child.once('error', (error) => {
+      if (settled) return
+      settleError(new Error(`Node runtime resolution could not start in ${projectRoot} for ${context}.`, { cause: error }))
+    })
+    child.once('close', (status, signal) => {
+      closed = { status, signal }
+      finish()
+    })
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+    else child.stdin.end(JSON.stringify(requests))
+  })
+  if (result.overflow) throw new Error(`Node runtime resolution exceeded the 16 MiB output limit in ${projectRoot} for ${context}.`)
+  if (result.status !== 0) throw new Error(`Node runtime resolution failed in ${projectRoot} for ${context}: ${result.stderr || result.signal || result.status}`)
   let values: { target?: string; error?: string }[]
-  try { values = JSON.parse(result.stdout) as typeof values } catch { throw new Error(`Node runtime resolution returned invalid output in ${projectRoot}: ${result.stdout}\n${result.stderr}`) }
+  try { values = JSON.parse(result.stdout) as typeof values } catch { throw new Error(`Node runtime resolution returned invalid output in ${projectRoot} for ${context}: ${result.stdout}\n${result.stderr}`) }
   const selected = new Map<number, string>()
   const failures = requests.flatMap((request) => {
     const value = values[request.id]
