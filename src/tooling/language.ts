@@ -1,21 +1,25 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve, sep } from 'node:path'
-import { API } from 'typescript/unstable/sync'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { API, type Symbol as CompilerSymbol } from 'typescript/unstable/sync'
 import { parse } from '@babel/parser'
 import { parse as parseJsonc } from 'jsonc-parser'
 import { routeBindingMetadata } from './bindings.ts'
-import { routeFileLocation } from './route-files.ts'
+import { routeFileLocation, scopeCandidates } from './route-files.ts'
 
 type TextEdit = { start: number; end: number; text: string }
 type CompilerLocation = { sourceFile?: { fileName: string }; fileName?: string; pos: number; end: number }
 export type ToolingDiagnostic = { fileName?: string; pos?: number; end?: number; code: number; text: string }
 
+function parseModule(source: string) {
+  return parse(source, { sourceType: 'module', plugins: ['typescript'], errorRecovery: true }).program
+}
+
 function syntax(source: string) {
-  try { return parse(source, { sourceType: 'module', plugins: ['typescript'], errorRecovery: true }).program }
+  try { return parseModule(source) }
   catch {
     const lines = [...source.matchAll(/\n/g)].map((match) => match.index + 1).reverse()
-    for (const end of lines) try { return parse(source.slice(0, end), { sourceType: 'module', plugins: ['typescript'], errorRecovery: true }).program } catch { /* try the preceding complete line */ }
-    return parse('', { sourceType: 'module', plugins: ['typescript'] }).program
+    for (const end of lines) try { return parseModule(source.slice(0, end)) } catch { continue }
+    return parseModule('')
   }
 }
 
@@ -93,18 +97,19 @@ function contextProperty(source: string, name: string) {
   }
 }
 
+function declarationSpecifier(directory: string, file: string) {
+  const path = relative(directory, file).replaceAll(sep, '/').replace(/\.d\.ts$/, '')
+  return path.startsWith('.') ? path : `./${path}`
+}
+
 function helperDeclaration(root: string, file: string, files: Set<string>, definition: string, publicTypes: string) {
   const directory = dirname(file)
   const { parameters, parentFile } = routeBindingMetadata(root, file, files)
   const parent = parentFile ? `typeof import(${JSON.stringify('./' + relative(directory, parentFile).replace(/\.ts$/, ''))}).default` : 'ScopeView<{}, never>'
   const params = `{${parameters.map((name) => `${JSON.stringify(name)}: string`).join(';')}}`
-  const definitionImport = relative(directory, definition).replaceAll(sep, '/').replace(/\.ts$/, '')
-  const specifier = definitionImport.startsWith('.') ? definitionImport : `./${definitionImport}`
-  const publicImport = relative(directory, publicTypes).replaceAll(sep, '/').replace(/\.d\.ts$/, '')
-  const publicSpecifier = publicImport.startsWith('.') ? publicImport : `./${publicImport}`
   return `
-export * from ${JSON.stringify(publicSpecifier)}
-import type { DefineFileCreate, DefineFileDelete, DefineFileDetail, DefineFileList, DefineFileRoute, DefineFileScope, DefineFileUpdate, ScopeView } from ${JSON.stringify(specifier)}
+export * from ${JSON.stringify(declarationSpecifier(directory, publicTypes))}
+import type { DefineFileCreate, DefineFileDelete, DefineFileDetail, DefineFileList, DefineFileRoute, DefineFileScope, DefineFileUpdate, ScopeView } from ${JSON.stringify(declarationSpecifier(directory, definition))}
 type Parent = ${parent}
 type Params = ${params}
 export declare const defineScope: DefineFileScope<Parent, Params>
@@ -120,12 +125,11 @@ export declare const deleteRoute: DefineFileDelete<Parent, Params>
 export function createRouteLanguage(projectRoot: string, routesDirectory = 'routes') {
   const root = resolve(projectRoot, routesDirectory)
   const config = join(projectRoot, 'tsconfig.json')
-  const definitionFile = [resolve(import.meta.dirname, '../routes/definition.ts'), resolve(import.meta.dirname, '../src/routes/definition.ts')].find(existsSync)
-  if (!definitionFile) throw new Error('Sprindle route definitions are missing from this package')
-  const definition: string = definitionFile
   const publicTypesFile = [resolve(import.meta.dirname, '../../dist-types/index.d.ts'), resolve(import.meta.dirname, '../dist-types/index.d.ts')].find(existsSync)
   if (!publicTypesFile) throw new Error('Sprindle public type declarations are missing; prepare the package first')
   const publicTypes: string = publicTypesFile
+  const definition = join(dirname(publicTypes), 'routes', 'definition.d.ts')
+  if (!existsSync(definition)) throw new Error('Sprindle route definitions are missing from this package')
   const open = new Map<string, string>()
   let virtual = new Map<string, string>()
   let snapshot: ReturnType<API['updateSnapshot']> | undefined
@@ -133,7 +137,7 @@ export function createRouteLanguage(projectRoot: string, routesDirectory = 'rout
   let api = start()
 
   function refresh() {
-    const next = routeLanguageOverlay(projectRoot, routesDirectory, open, definition, publicTypes)
+    const next = routeLanguageOverlay({ projectRoot, root, config, open, definition, publicTypes })
     const created = [...next.keys()].filter((file) => !virtual.has(file))
     const deleted = [...virtual.keys()].filter((file) => !next.has(file))
     const changed = [...next.keys()].filter((file) => virtual.has(file) && virtual.get(file) !== next.get(file))
@@ -144,6 +148,22 @@ export function createRouteLanguage(projectRoot: string, routesDirectory = 'rout
     const project = snapshot.getProject(config)
     if (!project) throw new Error(`TypeScript did not open ${config}`)
     return project
+  }
+
+  function definitionLocations(file: string, symbol: CompilerSymbol | undefined) {
+    if (!symbol) return []
+    const found = (symbol.declarations ?? []).map((item) => item as unknown as CompilerLocation).flatMap(({ sourceFile, fileName, pos, end }) => fileName || sourceFile ? [{ fileName: fileName ?? sourceFile!.fileName, pos, end }] : [])
+    const physical = found.filter((item) => !/\.[sr]\.d\.ts$/.test(item.fileName))
+    if (physical.length) return physical
+    if (!symbol.name) return []
+    const files = new Set(walk(root))
+    const { segments } = routeFileLocation(root, file)
+    const scopes = scopeCandidates(root, segments).reverse().filter((item) => files.has(item))
+    for (const scope of scopes) {
+      const location = contextProperty(open.get(scope) ?? readFileSync(scope, 'utf8'), symbol.name)
+      if (location) return [{ fileName: scope, ...location }]
+    }
+    return []
   }
 
   return {
@@ -157,26 +177,16 @@ export function createRouteLanguage(projectRoot: string, routesDirectory = 'rout
     completions(file: string, position: number) { return refresh().checker.getCompletionsAtPosition(resolve(file), position)?.entries ?? [] },
     type(file: string, position: number, expanded = false) { const project = refresh(); const type = project.checker.getTypeAtPosition(resolve(file), position); return type && project.checker.typeToString(type, undefined, expanded ? 1 | 64 | 8_388_608 : undefined) },
     definitions(file: string, position: number) {
-      const project = refresh()
-      const symbol = project.checker.getSymbolAtPosition(resolve(file), position)
-      const found = (symbol?.declarations ?? []).map((item) => item as unknown as CompilerLocation).flatMap(({ sourceFile, fileName, pos, end }) => fileName || sourceFile ? [{ fileName: fileName ?? sourceFile!.fileName, pos, end }] : [])
-      const physical = found.filter((item) => !/\.[sr]\.d\.ts$/.test(item.fileName))
-      if (physical.length) return physical
-      const name = symbol?.name
-      if (!name) return []
-      const files = new Set(walk(root))
-      const { segments } = routeFileLocation(root, resolve(file))
-      const scopes = [root, ...segments.map((_, index) => join(root, ...segments.slice(0, index + 1)))].reverse().map((item) => join(item, '+scope.ts')).filter((item) => files.has(item))
-      for (const scope of scopes) { const location = contextProperty(open.get(scope) ?? readFileSync(scope, 'utf8'), name); if (location) return [{ fileName: scope, ...location }] }
-      return []
+      const path = resolve(file)
+      return definitionLocations(path, refresh().checker.getSymbolAtPosition(path, position))
     },
     rename(file: string, position: number) {
-      const project = refresh()
-      const symbol = project.checker.getSymbolAtPosition(resolve(file), position)
+      const path = resolve(file)
+      const symbol = refresh().checker.getSymbolAtPosition(path, position)
       if (!symbol) return []
-      const directoryParameters = routeFileLocation(root, resolve(file)).parameters
+      const directoryParameters = routeFileLocation(root, path).parameters
       if (directoryParameters.includes(symbol.name)) throw new Error(`Parameter rename requires a directory move: ${symbol.name}`)
-      const definitions = this.definitions(file, position)
+      const definitions = definitionLocations(path, symbol)
       if (definitions.some((item) => item.fileName.endsWith(`${sep}+scope.ts`))) throw new Error(`Context property rename is unavailable because complete references cannot be proven: ${symbol.name}`)
       throw new Error(`Rename is unavailable because complete references cannot be proven: ${symbol.name}`)
     },
@@ -184,26 +194,26 @@ export function createRouteLanguage(projectRoot: string, routesDirectory = 'rout
   }
 }
 
-export function routeLanguageOverlay(
-  projectRoot: string,
-  routesDirectory = 'routes',
-  open = new Map<string, string>(),
-  definitionFile?: string,
-  publicTypesFile?: string,
-) {
-  const root = resolve(projectRoot, routesDirectory)
-  const config = join(projectRoot, 'tsconfig.json')
-  const definition = definitionFile ?? [resolve(import.meta.dirname, '../routes/definition.ts'), resolve(import.meta.dirname, '../src/routes/definition.ts')].find(existsSync)
-  const publicTypes = publicTypesFile ?? [resolve(import.meta.dirname, '../../dist-types/index.d.ts'), resolve(import.meta.dirname, '../dist-types/index.d.ts')].find(existsSync)
-  if (!definition || !publicTypes) throw new Error('Sprindle route definition declarations are missing; prepare the package first')
-  const routeFiles = [...walk(root), ...open.keys()]
-  const entryFiles = routeFiles.filter((file) => /\/(?:\+scope|\+server)\.ts$/.test(file))
-  const paths = new Set([...entryFiles, ...sourceDependencies(entryFiles, open).filter((file) => file.startsWith(root + sep) && file.endsWith('.ts'))])
+export function routeLanguageOverlay({ projectRoot, root, config, open, definition, publicTypes }: {
+  projectRoot: string
+  root: string
+  config: string
+  open: Map<string, string>
+  definition: string
+  publicTypes: string
+}) {
+  const inRoutes = (file: string) => {
+    const path = relative(root, file)
+    return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path)
+  }
+  const routeFiles = [...walk(root), ...open.keys()].filter(inRoutes)
+  const entryFiles = routeFiles.filter((file) => /^\+(?:scope|server)\.ts$/.test(basename(file)))
+  const paths = new Set(sourceDependencies(entryFiles, open).filter((file) => inRoutes(file) && file.endsWith('.ts')))
   const next = new Map<string, string>()
   const dependencies = sourceDependencies([...projectFiles(projectRoot), ...configFiles(config), ...open.keys()], open)
   for (const file of dependencies) next.set(file, open.get(file) ?? readFileSync(file, 'utf8'))
   for (const file of paths) {
-    const isScope = file.endsWith('/+scope.ts')
+    const isScope = basename(file) === '+scope.ts'
     const helper = isScope ? '.s' : '.r'
     next.set(file, redirectSprindleImports(open.get(file) ?? readFileSync(file, 'utf8'), `./${helper}`))
     next.set(join(dirname(file), `${helper}.d.ts`), helperDeclaration(root, file, paths, definition, publicTypes))

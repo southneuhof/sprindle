@@ -1,11 +1,17 @@
 import { validationError } from '../errors'
-import { normalizeListQuery, requireStringParam } from '../validation'
-import type { ModelRuntimeContext, ModelSource, SourceListResult } from '../source'
+import { normalizeListQuery } from '../validation'
+import { sourceListFilterEntries, sourceListOptions, sourceVirtualParameters } from '../source/list-query'
+import type { ModelRuntimeContext, ModelSource, SourceListResult } from '../source/model-source'
+
+type MemoryVirtualParameter<TRecord> = {
+  validate?: (raw: unknown, field: string) => unknown
+  where: (value: unknown, row: TRecord) => boolean | Promise<boolean>
+}
 
 export type MemorySourceRead<TRecord> = {
   pinnedOrder?: (left: TRecord, right: TRecord) => number
   searchColumns?: (keyof TRecord & string)[]
-  virtual?: Record<string, { validate?: (raw: unknown, field: string) => unknown; where: (value: unknown, row: TRecord) => boolean | Promise<boolean> }>
+  virtual?: Record<string, MemoryVirtualParameter<TRecord>>
 }
 
 type MemoryWriteScope<TRecord> = (row: TRecord) => boolean | Promise<boolean>
@@ -18,52 +24,8 @@ export type MemorySource<TRecord> = Omit<ModelSource<TRecord>, 'list' | 'detail'
   delete: (args: { id: string; where?: MemoryWriteScope<TRecord>; context: ModelRuntimeContext }) => Promise<boolean>
 }
 
-const RESERVED_LIST_QUERY_KEYS = new Set(['page', 'limit', 'search', 'sort', 'order'])
-
-type MemoryListOptions<TRecord> = {
-  source: Record<string, unknown>
-  page: number
-  limit: number
-  search: string | undefined
-  pinnedOrder: MemorySourceRead<TRecord>['pinnedOrder']
-  order: 'asc' | 'desc'
-  sort: string | undefined
-  fields: Set<string>
-}
-
-function memoryListOptions<TRecord extends Record<string, unknown>>(
-  query: Record<string, unknown>,
-  rows: TRecord[],
-  virtualKeys: Set<string>,
-  pinnedOrder: MemorySourceRead<TRecord>['pinnedOrder'],
-): MemoryListOptions<TRecord> {
-  const source = normalizeListQuery(query)
-  const page = toPositiveInteger(source.page, 1)
-  const limit = toPositiveInteger(source.limit, 20)
-  const search = virtualKeys.has('search') ? undefined : typeof source.search === 'string' && source.search.length ? source.search.toLowerCase() : undefined
-  const order = source.order === 'desc' ? 'desc' : 'asc'
-  const sort = pinnedOrder || source.sort == null || source.sort === '' ? undefined : String(source.sort)
-  const fields = new Set(rows.flatMap((row) => Object.keys(row)))
-  if (sort && !fields.has(sort)) throw validationError(`Unknown sort column "${sort}".`)
-  return { source, page, limit, search, pinnedOrder, order, sort, fields }
-}
-
-function memoryVirtualTests<TRecord extends Record<string, unknown>>(
-  source: Record<string, unknown>,
-  virtualParams: NonNullable<MemorySourceRead<TRecord>['virtual']>,
-) {
-  const presentVirtuals: { test: (row: TRecord) => Promise<boolean> }[] = []
-  for (const [field, param] of Object.entries(virtualParams)) {
-    const raw = source[field]
-    if (raw === undefined) continue
-    const value = param.validate ? param.validate(raw, field) : requireStringParam(raw, field)
-    presentVirtuals.push({ test: async (row) => param.where(value, row) })
-  }
-  return presentVirtuals
-}
-
 function memoryFilters(source: Record<string, unknown>, virtualKeys: Set<string>, fields: Set<string>) {
-  const filters = Object.entries(source).filter(([key, value]) => !RESERVED_LIST_QUERY_KEYS.has(key) && !virtualKeys.has(key) && value !== undefined)
+  const filters = sourceListFilterEntries(source, virtualKeys)
   for (const [key] of filters) {
     if (!fields.has(key)) throw validationError(`Unknown query parameter "${key}".`)
   }
@@ -73,14 +35,14 @@ function memoryFilters(source: Record<string, unknown>, virtualKeys: Set<string>
 async function filterMemoryRows<TRecord extends Record<string, unknown>>(
   rows: TRecord[],
   filters: [string, unknown][],
-  virtuals: { test: (row: TRecord) => Promise<boolean> }[],
+  virtuals: { param: MemoryVirtualParameter<TRecord>; value: unknown }[],
 ) {
   const matched: TRecord[] = []
   for (const row of rows) {
     if (!filters.every(([key, value]) => String(row[key]) === String(value))) continue
     let passes = true
-    for (const { test } of virtuals) {
-      if (!(await test(row))) {
+    for (const { param, value } of virtuals) {
+      if (!(await param.where(value, row))) {
         passes = false
         break
       }
@@ -133,26 +95,25 @@ export function createMemorySource<TRecord extends Record<string, unknown>>(
     async list({ query, where: scopeWhere }): Promise<SourceListResult<TRecord>> {
       const virtualParams = config.read?.virtual ?? {}
       const virtualKeys = new Set(Object.keys(virtualParams))
-      const options = memoryListOptions(query ?? {}, rows, virtualKeys, config.read?.pinnedOrder)
-      const presentVirtuals = memoryVirtualTests(options.source, virtualParams)
-      const filters = memoryFilters(options.source, virtualKeys, options.fields)
+      const source = normalizeListQuery(query ?? {})
+      const pinnedOrder = config.read?.pinnedOrder
+      const { limit, offset, search, sort, order } = sourceListOptions(source, virtualKeys, Boolean(pinnedOrder))
+      const fields = new Set(rows.flatMap((row) => Object.keys(row)))
+      if (sort && !fields.has(sort)) throw validationError(`Unknown sort column "${sort}".`)
+      const presentVirtuals = sourceVirtualParameters(source, virtualParams)
+      const filters = memoryFilters(source, virtualKeys, fields)
       let matched = await filterMemoryRows(rows, filters, presentVirtuals)
       // Server-owned read scope, mirroring the Drizzle source's AND-after-plan
       // semantics. Memory sources receive a row predicate instead of SQL.
       if (scopeWhere) matched = matched.filter(scopeWhere)
-      matched = filterMemorySearch(matched, options.search, searchColumns)
-      // Primary-key tie-break, mirroring the Drizzle source: rows that tie on
-      // the visible sort stay deterministic between queries.
-      matched = sortMemoryRows(matched, options.pinnedOrder, options.sort, options.order, idKey)
+      matched = filterMemorySearch(matched, search?.toLowerCase(), searchColumns)
+      matched = sortMemoryRows(matched, pinnedOrder, sort, order, idKey)
 
-      const offset = (options.page - 1) * options.limit
-      return { data: matched.slice(offset, offset + options.limit), total: matched.length }
+      return { data: matched.slice(offset, offset + limit), total: matched.length }
     },
     async detail({ id, where: scopeWhere }) {
       const row = rows[indexOf(id)]
       if (!row) return null
-      // Server-owned read scope on single-row reads, mirroring the Drizzle
-      // source: a hidden row answers null, which routes map to 404.
       if (scopeWhere && !scopeWhere(row)) return null
       return row
     },
@@ -181,11 +142,6 @@ export function createMemorySource<TRecord extends Record<string, unknown>>(
       return input as TRecord | TRecord[]
     },
   }
-}
-
-function toPositiveInteger(value: unknown, fallback: number) {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 function compare(left: unknown, right: unknown) {

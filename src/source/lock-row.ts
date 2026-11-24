@@ -1,8 +1,8 @@
-import { and, eq, getTableColumns, isNull } from 'drizzle-orm'
+import { and, getTableColumns, isNull } from 'drizzle-orm'
 import type { AnyColumn, InferSelectModel, SQL } from 'drizzle-orm'
 import type { PgTable } from 'drizzle-orm/pg-core'
 import { HttpError, notFound } from '../errors'
-import { getPrimaryKeyEntries } from './drizzle-internals'
+import { getPrimaryKeyEntries, primaryKeyConditions } from './drizzle-internals'
 
 /** The slice of the Drizzle transaction handle `lockRow` needs. `never` parameters keep the shape assignable from Drizzle's generic builders. */
 type LockDb = {
@@ -18,17 +18,7 @@ type LockDb = {
 export type LockRowOptions = {
   /** Every key must equal the locked row's value; a miss answers 409 invalid_transition. */
   require?: Record<string, unknown>
-  /** Replaces the default 409 message. */
   failMessage?: string
-}
-
-function parseCompositeId(id: unknown): Record<string, unknown> {
-  if (id && typeof id === 'object' && !Array.isArray(id)) return id as Record<string, unknown>
-  if (typeof id === 'string') {
-    const value = JSON.parse(id)
-    if (value && typeof value === 'object' && !Array.isArray(value)) return value
-  }
-  throw new Error('Composite primary key id must be an object or JSON object string')
 }
 
 /**
@@ -43,9 +33,7 @@ export async function lockRow<T extends PgTable>(
   id: string,
   options: LockRowOptions = {},
 ): Promise<InferSelectModel<T>> {
-  const primaryKey = getPrimaryKeyEntries(table)
-  const values = primaryKey.length === 1 ? { [primaryKey[0].key]: id } : parseCompositeId(id)
-  const identity: SQL[] = primaryKey.map(({ key, column }) => eq(column, values[key]))
+  const identity = primaryKeyConditions(getPrimaryKeyEntries(table), id)
 
   const columns = getTableColumns(table as never) as Record<string, AnyColumn>
   const liveness: SQL[] = columns.deletedAt ? [isNull(columns.deletedAt)] : []

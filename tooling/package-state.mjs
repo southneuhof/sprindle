@@ -104,7 +104,7 @@ function typescriptInputs(root) {
     const identity = dependencyForInput(file)
     if (identity) dependencies.set(`${identity.name}@${identity.version}`, identity)
   }
-  return { files, configs: localExtendedConfigs(configPath), requireFromPackage, dependencies: [...dependencies.values()] }
+  return { files, configs: localExtendedConfigs(configPath), dependencies: [...dependencies.values()] }
 }
 
 function workspaceInputs(root) {
@@ -117,15 +117,6 @@ function workspaceInputs(root) {
     join(workspaceRoot, 'pnpm-lock.yaml'),
     join(workspaceRoot, '.npmrc'),
   ].filter((file) => existsSync(file))
-}
-
-function inputFiles(root, selectedFiles, configs) {
-  return [...new Set([
-    ...selectedFiles,
-    ...configs,
-    ...toolEntries.map((name) => join(root, 'tooling', name)),
-    ...workspaceInputs(root),
-  ])].sort()
 }
 
 function inputDescriptor(root, files, dependencyIdentities) {
@@ -147,13 +138,19 @@ function inputDescriptor(root, files, dependencyIdentities) {
 export function packageInputState(root = packageRootFromModule) {
   const packageRoot = resolve(root)
   const selected = typescriptInputs(packageRoot)
-  const files = inputFiles(packageRoot, selected.files, selected.configs)
+  const workspaceFiles = workspaceInputs(packageRoot)
+  const files = [...new Set([
+    ...selected.files,
+    ...selected.configs,
+    ...toolEntries.map((name) => join(packageRoot, 'tooling', name)),
+    ...workspaceFiles,
+  ])].sort()
   const state = inputDescriptor(packageRoot, files, selected.dependencies)
   const watchPaths = [...new Set([
     join(packageRoot, 'src'),
     join(packageRoot, 'tooling'),
     ...selected.configs,
-    ...workspaceInputs(packageRoot),
+    ...workspaceFiles,
   ])]
   return { ...state, watchPaths }
 }

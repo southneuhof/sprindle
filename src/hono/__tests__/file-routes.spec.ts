@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { forbidden } from '../../errors'
 import { installSprindle, sprindleNotFound, sprindleOnError, type FileRouteManifestEntry } from '..'
-import { create, defineRoute, defineScope, detail, list, update } from '../../routes'
+import { create, defineRoute, defineScope, deleteRoute, detail, list, update } from '../../routes'
 import { createTestEntity } from '../../testing'
 
 const entry = (path: string, handlers: Record<string, unknown>, scopes: unknown[] = [], parameters: string[] = []): FileRouteManifestEntry => ({
@@ -290,6 +290,7 @@ describe('file route runtime', () => {
   })
 
   it('rejects invalid resource definitions before requests', () => {
+    expect(() => app([entry('/delete/:id', { DELETE: deleteRoute() }, [], ['id'])])).toThrow('delete needs an entity scope')
     expect(() => app([entry('/items', { POST: list() })])).toThrow('list cannot be exported as POST')
     expect(() => app([entry('/items/:itemId', { GET: detail() }, [defineScope({ entity: createTestEntity() })], ['itemId'])])).toThrow('needs parameter id')
     expect(() => app([entry('/custom', { GET: defineRoute({ action: () => ({}) }) }, [{}])])).toThrow('invalid scope definition')

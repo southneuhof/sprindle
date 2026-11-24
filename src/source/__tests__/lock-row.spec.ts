@@ -1,6 +1,6 @@
 import { PgDialect, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { HttpError, notFound } from '../../errors'
+import { HttpError } from '../../errors'
 import { lockRow } from '../lock-row'
 
 const reports = pgTable('lock_reports', {
@@ -57,7 +57,7 @@ describe('lockRow', () => {
   it('answers notFound when the row is absent or soft-deleted', async () => {
     const { db } = createLockDb([])
 
-    await expect(lockRow(db, reports, 'missing')).rejects.toThrow(notFound())
+    await expect(lockRow(db, reports, 'missing')).rejects.toMatchObject({ status: 404, code: 'not_found' })
   })
 
   it('answers the default 409 invalid_transition on a guard miss', async () => {
@@ -87,13 +87,17 @@ describe('lockRow', () => {
     expect((miss as HttpError).message).toBe('Not at report stage.')
   })
 
-  it('skips the liveness predicate when the table has no deletedAt column', async () => {
+  it('locks both keys and skips the liveness predicate for a table without deletedAt', async () => {
     const row = { tagId: 't-1', itemId: 'i-1' }
     const { db, calls } = createLockDb([row])
 
     const locked = await lockRow(db, tagged, JSON.stringify({ tagId: 't-1', itemId: 'i-1' }))
 
     expect(locked).toEqual(row)
-    expect(sqlText(calls.where[0])).not.toContain('deleted_at')
+    const query = new PgDialect().sqlToQuery(calls.where[0] as never)
+    expect(query.sql).toContain('"tag_id"')
+    expect(query.sql).toContain('"item_id"')
+    expect(query.sql).not.toContain('deleted_at')
+    expect(query.params).toEqual(['t-1', 'i-1'])
   })
 })

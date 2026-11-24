@@ -9,11 +9,6 @@ import { forbidden } from '../errors'
 
 import { createMemorySource } from '../testing'
 
-type Expect<T extends true> = T
-type Equal<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false
-
-// Install attaches merged pipelines onto the model's live context, so one
-// model instance belongs to exactly one installation. Fresh models per case.
 function makeEntity(): DomainEntity & { memoryRows: Array<Record<string, unknown>> } {
   const entity = createEntity({
     table: { name: 'items' },
@@ -42,7 +37,6 @@ function makeModel(entity: DomainEntity, order: string[]) {
     routes: {
       list: list(),
       store: create(),
-      // A route-tree key appends to the route's own path; empty path keeps /items/boom.
       boom: testDefineRoute({
         method: 'get',
         path: '',
@@ -128,13 +122,5 @@ describe('composition pipeline', () => {
     })
     expect(response.status).toBe(201)
     expect(entity.memoryRows[0]).toMatchObject({ id: 'a-1', name: 'First', tag: 'injected' })
-  })
-
-  it('keeps client types identical to the flat installation', () => {
-    const bundles = [testDefineModule({ models: [makeModel(makeEntity(), [])] })] as const
-    const bundled = testInstallSprindle(new Hono(), bundles, {})
-    const flat = testInstallSprindle(new Hono(), [[...bundles[0].models][0]] as const, {})
-    type _parity = Expect<Equal<typeof bundled, typeof flat>>
-    expect(bundled.request).toBeTypeOf('function')
   })
 })

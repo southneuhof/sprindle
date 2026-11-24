@@ -16,4 +16,4 @@ export type {
   RouteValidate,
   ValidationIssue,
 } from './route-types'
-export type { ModelRuntimeContext } from './model-context'
+export type { ModelRuntimeContext } from '../source/model-source'

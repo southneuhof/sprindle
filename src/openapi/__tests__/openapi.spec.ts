@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod/v4'
-import { generateOpenApi } from '..'
+import { Hono } from 'hono'
+import { generateInstalledOpenApi, generateOpenApi } from '..'
 import { create, defineRoute, defineScope, deleteRoute, detail, list, update } from '../../routes'
 import { createTestEntity } from '../../testing'
-import type { FileRouteManifestEntry } from '../../hono'
+import { installSprindle, type FileRouteManifestEntry } from '../../hono'
 
 const entry = (httpPath: string, handlers: Record<string, unknown>, scopes: unknown[] = [], parameters: string[] = []): FileRouteManifestEntry => ({ sourcePath: `${httpPath}/+server.ts`, httpPath, handlers, scopes, parameters, methods: Object.keys(handlers) })
 const entity = createTestEntity({ name: 'items', schemas: { create: z.object({ name: z.string() }), update: z.object({ name: z.string().optional() }), select: z.object({ id: z.string(), name: z.string() }) } })
@@ -18,7 +19,15 @@ const document = generateOpenApi(manifest, { title: 'Test', version: '1' })
 const operation = (path: string, method: string) => document.paths[path][method] as Record<string, unknown>
 
 describe('file route OpenAPI', () => {
-  it('emits every path with OpenAPI parameter syntax', () => expect(Object.keys(document.paths).sort()).toEqual(['/custom','/items/create','/items/delete/{id}','/items/detail/{id}','/items/list','/items/update/{id}']))
+  it('emits mounted paths with OpenAPI parameter syntax', async () => {
+    const app = installSprindle(new Hono(), manifest)
+    app.get('/openapi.json', (c) => c.json(generateInstalledOpenApi(c, { title: 'Test', version: '1' })))
+
+    const response = await app.request('/openapi.json')
+    expect(response.status).toBe(200)
+    const { paths } = await response.json()
+    expect(Object.keys(paths).sort()).toEqual(['/custom','/items/create','/items/delete/{id}','/items/detail/{id}','/items/list','/items/update/{id}'])
+  })
   it('declares list query and path parameters', () => {
     const listParameters = operation('/items/list', 'get').parameters as { name: string }[]
     expect(listParameters.map((value) => value.name)).toEqual(['page','limit','search','sort','order'])
@@ -27,8 +36,24 @@ describe('file route OpenAPI', () => {
   })
   it('uses entity schemas and custom request bodies', () => {
     expect(Object.keys(document.components.schemas).sort()).toEqual(['Items','ItemsCreate','ItemsUpdate'])
-    expect(operation('/items/create', 'post').requestBody).toBeDefined()
-    expect(operation('/custom', 'post').requestBody).toBeDefined()
+    expect(operation('/items/create', 'post').requestBody).toEqual({
+      required: true,
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/ItemsCreate' } } },
+    })
+    expect(operation('/custom', 'post').requestBody).toMatchObject({
+      required: true,
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['file'],
+            properties: {
+              file: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+            },
+          },
+        },
+      },
+    })
   })
   it('documents canonical response statuses', () => {
     const statuses = (path: string, method: string) => Object.keys((document.paths[path][method] as { responses: object }).responses).sort()

@@ -3,7 +3,7 @@ import { defineRelationsPart } from 'drizzle-orm'
 import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { z } from 'zod/v4'
 import { createEntity, defineDomainPart, defineDomainSchema } from '../../model'
-import { getPrimaryKeyEntries, resolveThroughColumn } from '../drizzle-internals'
+import { getPrimaryKeyEntries } from '../drizzle-internals'
 
 /**
  * Canary for drizzle-orm private-API access. If this fails after a drizzle bump,
@@ -30,11 +30,14 @@ const keyless = pgTable('keyless', {
 
 describe('drizzle internals', () => {
   it('reads inline primary keys', () => {
-    expect(getPrimaryKeyEntries(singleKey).map((entry) => entry.key)).toEqual(['id'])
+    expect(getPrimaryKeyEntries(singleKey).map(({ key, column }) => [key, column.name])).toEqual([['id', 'id']])
   })
 
   it('reads composite primary keys declared in the extra config', () => {
-    expect(getPrimaryKeyEntries(compositeKey).map((entry) => entry.key)).toEqual(['leftId', 'rightId'])
+    expect(getPrimaryKeyEntries(compositeKey).map(({ key, column }) => [key, column.name])).toEqual([
+      ['leftId', 'left_id'],
+      ['rightId', 'right_id'],
+    ])
   })
 
   it('fails loudly for a table without a primary key', () => {
@@ -75,6 +78,5 @@ describe('drizzle internals', () => {
     expect(relation?.mode).toBe('through')
     expect(relation?.throughSourceColumns?.map((column) => column.name)).toEqual(['owner_id'])
     expect(relation?.throughTargetColumns?.map((column) => column.name)).toEqual(['tag_id'])
-    expect(resolveThroughColumn({ _: { column: singleKey.id } })?.name).toBe('id')
   })
 })

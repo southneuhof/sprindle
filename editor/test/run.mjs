@@ -9,7 +9,7 @@ const fixture = mkdtempSync(join(tmpdir(), 'sprindle-editor-'))
 const profile = mkdtempSync(join(tmpdir(), 'sprindle-editor-profile-'))
 const editor = mkdtempSync(join(tmpdir(), 'sprindle-editor-package-'))
 try {
-  for (const item of ['extension.cjs', 'package.json', 'dist', 'dist-types', 'node_modules', 'routes']) cpSync(join(editorSource, item), join(editor, item), { recursive: true })
+  for (const item of ['extension.cjs', 'package.json', 'dist', 'dist-types', 'node_modules']) cpSync(join(editorSource, item), join(editor, item), { recursive: true })
   mkdirSync(join(fixture, 'apps', 'api', 'src', 'routes', '[id]'), { recursive: true })
   mkdirSync(join(fixture, 'apps', 'api', 'node_modules'), { recursive: true })
   cpSync(join(editorSource, 'node_modules', 'zod'), join(fixture, 'apps', 'api', 'node_modules', 'zod'), { recursive: true })

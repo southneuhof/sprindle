@@ -1,15 +1,17 @@
 import type { Context, Hono } from 'hono'
-import { toHttpError } from '../errors'
 import type { IdentityResolver } from '../source'
 import type { DataWriteHook } from '../model/data-write'
 import type { RoutePipeline } from '../model/route-types'
-import { installFileRoutes, type FileRouteManifest } from './file-routes'
-export { assertRouteEntitiesBound, bindRouteEntities, getRouteManifest } from './file-routes'
+import { installFileRoutes } from './file-routes'
+import { httpErrorResponse } from './http-error'
+import type { FileRouteManifest } from './route-manifest'
+export { assertRouteEntitiesBound, bindRouteEntities } from './file-routes'
+export { getRouteManifest } from './route-manifest'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 
 export type { DataWriteHook } from '../model/data-write'
-export type { FileRouteManifest, FileRouteManifestEntry } from './file-routes'
+export type { FileRouteManifest, FileRouteManifestEntry } from './route-manifest'
 export type SprindleInstallable = FileRouteManifest[number]
 
 export type Logger = {
@@ -51,8 +53,8 @@ export async function loadRouteManifest(projectRoot: string, output = '.sprindle
 }
 
 export function sprindleOnError(error: Error, c: Context) {
-  const httpError = toHttpError(error)
-  if (httpError) return c.json({ error: httpError.code, message: httpError.message || undefined, issues: httpError.issues }, httpError.status as 400)
+  const response = httpErrorResponse(c, error)
+  if (response) return response
   const logger = (c.get('logger') as Logger | undefined) ?? consoleLogger
   logger.error({ requestId: c.get('requestId'), method: c.req.method, path: c.req.path, err: String(error) }, 'sprindle request failed')
   return c.json({ error: 'internal_error' }, 500)

@@ -9,13 +9,15 @@
  * Upgrade protocol: on any drizzle-orm bump, run `drizzle-internals.spec.ts` (the canary) FIRST.
  * If it is red, fix only this file — nothing else may reach into drizzle internals.
  */
-import { getTableColumns, getTableName, Table } from 'drizzle-orm'
+import { eq, getTableColumns, getTableName, Table } from 'drizzle-orm'
 import type { AnyColumn } from 'drizzle-orm'
 import { PrimaryKeyBuilder } from 'drizzle-orm/pg-core'
 
 const tableSymbols = (Table as unknown as { Symbol: Record<'ExtraConfigBuilder' | 'ExtraConfigColumns', symbol> }).Symbol
 
-export function getPrimaryKeyEntries(table: unknown): { key: string; column: AnyColumn }[] {
+export type PrimaryKeyEntry = { key: string; column: AnyColumn }
+
+export function getPrimaryKeyEntries(table: unknown): PrimaryKeyEntry[] {
   const columns = getTableColumns(table as never) as Record<string, AnyColumn>
   const inline = Object.entries(columns)
     .filter(([, column]) => column.primary)
@@ -38,6 +40,18 @@ export function getPrimaryKeyEntries(table: unknown): { key: string; column: Any
   }
 
   throw new Error(`Primary key not found for table "${getTableName(table as never)}"`)
+}
+
+export function primaryKeyValues(primaryKey: readonly PrimaryKeyEntry[], id: unknown): Record<string, unknown> {
+  if (primaryKey.length === 1) return { [primaryKey[0].key]: id }
+  const value: unknown = typeof id === 'string' ? JSON.parse(id) : id
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  throw new Error('Composite primary key id must be an object or JSON object string')
+}
+
+export function primaryKeyConditions(primaryKey: readonly PrimaryKeyEntry[], id: unknown) {
+  const values = primaryKeyValues(primaryKey, id)
+  return primaryKey.map(({ key, column }) => eq(column, values[key]))
 }
 
 export function resolveThroughColumn(column: unknown): AnyColumn | undefined {

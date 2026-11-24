@@ -6,8 +6,9 @@ import { spawnSync } from 'node:child_process'
 import { editorDependencies, editorInputState, writeEditorReceipt } from './state.mjs'
 
 const editor = fileURLToPath(new URL('.', import.meta.url))
-rmSync(fileURLToPath(new URL('./dist', import.meta.url)), { recursive: true, force: true })
-rmSync(fileURLToPath(new URL('./node_modules', import.meta.url)), { recursive: true, force: true })
+for (const directory of ['dist', 'dist-types', 'node_modules']) {
+  rmSync(join(editor, directory), { recursive: true, force: true })
+}
 const inputs = editorInputState(editor)
 const packageBuild = spawnSync('node', [fileURLToPath(new URL('../tooling/package.mjs', import.meta.url))], { encoding: 'utf8' })
 if (packageBuild.error) throw new Error('Sprindle package preparation could not start.', { cause: packageBuild.error })
@@ -28,8 +29,6 @@ for (const dependency of editorDependencies(editor)) {
   mkdirSync(dirname(destination), { recursive: true })
   cpSync(dependency.source, destination, { recursive: true })
 }
-mkdirSync(`${editor}/routes`, { recursive: true })
-cpSync(fileURLToPath(new URL('../src/routes/definition.ts', import.meta.url)), `${editor}/routes/definition.ts`)
 cpSync(fileURLToPath(new URL('../dist-types', import.meta.url)), `${editor}/dist-types`, { recursive: true })
 mkdirSync(`${editor}/node_modules/@southneuhof/sprindle`, { recursive: true })
 cpSync(fileURLToPath(new URL('../dist-types', import.meta.url)), `${editor}/node_modules/@southneuhof/sprindle/dist-types`, { recursive: true })

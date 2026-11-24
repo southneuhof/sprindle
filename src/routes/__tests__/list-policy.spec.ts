@@ -1,6 +1,6 @@
 import { defineFileModelFixture } from '../../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
-import { list } from '../list'
+import { list } from '..'
 import { sprindleOnError } from '../../hono'
 
 import { createTestEntity, testApp } from '../../testing'
@@ -8,8 +8,8 @@ import { createTestEntity, testApp } from '../../testing'
 type Item = { id: string; name: string; categoryCode: string }
 
 const seed: Item[] = [
-  { id: 'b', name: 'Beta', categoryCode: 'measuring-instruments' },
-  { id: 'a', name: 'Alpha', categoryCode: 'heavy-equipments' },
+  { id: 'b', name: 'Beta', categoryCode: 'heavy-equipments' },
+  { id: 'a', name: 'Alpha', categoryCode: 'measuring-instruments' },
 ]
 
 const buildApp = (listConfig: Parameters<typeof list>[0], observed: Record<string, unknown> = {}) => {
@@ -52,7 +52,7 @@ describe('list query policy', () => {
 
     expect(response.status).toBe(200)
     const body = (await response.json()) as { data: Item[] }
-    expect(body.data.map((row) => row.id)).toEqual(['a', 'b'])
+    expect(body.data.map((row) => row.id)).toEqual(['b', 'a'])
     expect(observed.sort).toBe('categoryCode')
   })
 
@@ -63,7 +63,7 @@ describe('list query policy', () => {
 
     expect(response.status).toBe(200)
     const body = (await response.json()) as { data: Item[] }
-    expect(body.data.map((row) => row.id)).toEqual(['a'])
+    expect(body.data.map((row) => row.id)).toEqual(['b'])
   })
 
   it('answers 400 naming the key for a non-member enum value', async () => {
@@ -78,7 +78,11 @@ describe('list query policy', () => {
   it('treats an empty enum value as absent', async () => {
     const app = buildApp({ query: { enumFilters: { categoryCode: ['heavy-equipments'] } } })
 
-    expect((await app.request('/policy-items/list?categoryCode=')).status).toBe(200)
+    const response = await app.request('/policy-items/list?categoryCode=')
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { data: Item[] }
+    expect(body.data.map((row) => row.id).sort()).toEqual(['a', 'b'])
   })
 
   it('applies defaultSort with defaultOrder when the client sends no query', async () => {

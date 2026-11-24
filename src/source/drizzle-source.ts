@@ -3,8 +3,9 @@ import type { AnyColumn, SQL } from 'drizzle-orm'
 import type { DomainEntity } from '../entity'
 import type { DomainRelationField, DomainSchema } from '../model/domain-schema'
 import { validationError } from '../errors'
-import { normalizeListQuery, requireStringParam } from '../validation'
-import { getPrimaryKeyEntries } from './drizzle-internals'
+import { normalizeListQuery } from '../validation'
+import { getPrimaryKeyEntries, primaryKeyConditions, primaryKeyValues, type PrimaryKeyEntry } from './drizzle-internals'
+import { sourceListFilterEntries, sourceListOptions, sourceVirtualParameters } from './list-query'
 import type { ModelSource } from './model-source'
 
 type SelectBuilder = {
@@ -95,18 +96,7 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
   const readRelationFields = readRelations.map((relation) => relation.field)
   const relationByField = new Map(writeRelations.map((relation) => [relation.field, relation]))
   const withRelations = readRelationFields.length ? Object.fromEntries(readRelationFields.map((field) => [field, true])) : undefined
-  const wherePrimaryKey = (id: unknown) => {
-    const values = primaryKey.length === 1 ? { [primaryKey[0].key]: id } : parseCompositeId(id)
-    return and(...primaryKey.map(({ key, column }) => eq(column, values[key])))
-  }
-  const wherePrimaryKeyObject = (id: unknown) => {
-    if (primaryKey.length === 1) return { [primaryKey[0].key]: id }
-    return parseCompositeId(id)
-  }
-  const resolveWriteScope = (scopeWhere: unknown) => {
-    if (typeof scopeWhere !== 'function') return scopeWhere
-    return (scopeWhere as (table: unknown, op: typeof operators) => unknown)(table, operators)
-  }
+  const wherePrimaryKey = (id: unknown) => and(...primaryKeyConditions(primaryKey, id))
 
   const stringColumns = Object.entries(tableColumns).filter(([, column]) => column.dataType === 'string')
   const searchColumnKeys = read?.searchColumns
@@ -119,17 +109,16 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
   const virtualKeys = new Set(Object.keys(virtualParams))
 
   const buildListPlan = (query: Record<string, unknown>, columns: Record<string, AnyColumn>, alias: string | undefined, virtualConditions: SQL[]) => {
-    const page = toPositiveInteger(query.page, 1)
-    const limit = toPositiveInteger(query.limit, DEFAULT_LIST_LIMIT)
     const pinnedOrder = read?.pinnedOrder
-    const ordering = resolveListOrdering(query, columns, virtualKeys, pinnedOrder)
+    const { limit, offset, search, order, sort } = sourceListOptions(query, virtualKeys, Boolean(pinnedOrder))
+    if (sort && !(sort in columns)) throw validationError(`Unknown sort column "${sort}".`)
+    const ordering = { pinnedOrder, order, sort }
     const filters = collectListFilters(query, columns, virtualKeys)
-    const { conditions, objectConditions } = buildListConditions(filters, ordering.search, searchColumnKeys, virtualConditions, columns)
+    const { conditions, objectConditions } = buildListConditions(filters, search, searchColumnKeys, virtualConditions, columns)
 
     return {
-      page,
       limit,
-      offset: (page - 1) * limit,
+      offset,
       where: conditions.length ? and(...conditions) : undefined,
       objectWhere: combineObjectConditions(objectConditions),
       // Every canonical list ends with the primary-key terms, so rows that
@@ -169,7 +158,7 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
   const materializeOne = async (row: unknown, reader: DrizzleDb = database): Promise<TRecord> => {
     if (!tableKey || !withRelations) return schemas.select.parse(row)
     const id = getRowId(row, primaryKey)
-    const hydrated = await reader.query?.[tableKey]?.findFirst({ where: wherePrimaryKeyObject(id), with: withRelations })
+    const hydrated = await reader.query?.[tableKey]?.findFirst({ where: primaryKeyValues(primaryKey, id), with: withRelations })
     if (!hydrated) throw new Error(`Record not found while materializing table "${tableKey}".`)
     return schemas.select.parse(hydrated)
   }
@@ -178,12 +167,7 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
     async list({ query, where: scopeWhere }) {
       const requested = normalizeListQuery(query ?? {})
       const relational = relationalReader(database)
-      const presentVirtuals: { param: CreateDrizzleSourceVirtualParam; value: unknown }[] = []
-      for (const [field, param] of Object.entries(virtualParams)) {
-        const raw = requested[field]
-        if (raw === undefined) continue
-        presentVirtuals.push({ param, value: param.validate ? param.validate(raw, field) : requireStringParam(raw, field) })
-      }
+      const presentVirtuals = sourceVirtualParameters(requested, virtualParams)
 
       // Drizzle's relational reader aliases its root table as d0. Build a
       // virtual condition against that same alias so awaited builders remain
@@ -200,17 +184,11 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       // the real table for counting/builder reads and hands the factory itself
       // to the relational query as a RAW filter, so Drizzle binds it to the
       // aliased row.
-      const scopeFactory = typeof scopeWhere === 'function' ? (scopeWhere as unknown as (table: unknown, op: typeof operators) => unknown) : undefined
-      const scopeSql = scopeFactory ? scopeFactory(planTable, operators) : scopeWhere
-      const where = and(plan.where as never, scopeSql as never)
+      const where = and(plan.where as never, evaluateScope(scopeWhere, planTable) as never)
       const total = await countRows(where, planTable)
 
       if (relational) {
-        const objectWhere = scopeWhere
-          ? plan.objectWhere
-            ? { AND: [plan.objectWhere, { RAW: scopeWhere }] }
-            : { RAW: scopeWhere }
-          : plan.objectWhere
+        const objectWhere = withRelationalScope(plan.objectWhere, scopeWhere)
         const rows = await relational.findMany({ where: objectWhere, orderBy: plan.relationalOrderBy, limit: plan.limit, offset: plan.offset, with: withRelations })
         return { data: rows.map((row) => schemas.select.parse(row)), total }
       }
@@ -222,14 +200,10 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       return { data: rows.map((row) => schemas.select.parse(row)), total }
     },
     async detail({ id, where: scopeWhere }) {
-      // Server-owned read scope on single-row reads, mirroring `list`: the
-      // scope is ANDed after the primary-key predicate, and a scope factory
-      // binds to the aliased base table for relational reads.
-      const scopeFactory = typeof scopeWhere === 'function' ? (scopeWhere as unknown as (table: unknown, op: typeof operators) => unknown) : undefined
-      const scopeSql = scopeFactory ? scopeFactory(table, operators) : scopeWhere
+      const scopeSql = evaluateScope(scopeWhere, table)
       const relational = relationalReader(database)
       if (relational) {
-        const where = scopeWhere ? { AND: [wherePrimaryKeyObject(id), { RAW: scopeWhere }] } : wherePrimaryKeyObject(id)
+        const where = withRelationalScope(primaryKeyValues(primaryKey, id), scopeWhere)
         const hydrated = await relational.findFirst({ where, with: withRelations })
         return hydrated ? schemas.select.parse(hydrated) : null
       }
@@ -243,7 +217,7 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       return withTransaction(database, async (tx) => {
         const rows = await tx.insert(table).values(row).returning()
         if (rows[0]) {
-          const id = getReturnedId(rows[0], primaryKey)
+          const id = getRowId(rows[0], primaryKey)
           await applyManyRelationValues(tx, id, relations, primaryKey, tableColumns)
           return (await materialize(rows[0], tx)) as TRecord
         }
@@ -255,19 +229,19 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
       const { row, relations } = splitRelationInput({ ...parsed, ...values }, relationByField)
       applyOneRelationValues(row, relations, tableColumns)
       return withTransaction(database, async (tx) => {
-        const where = and(wherePrimaryKey(id), resolveWriteScope(scopeWhere) as never)
-        const rows = hasKeys(row)
+        const where = and(wherePrimaryKey(id), evaluateScope(scopeWhere, table) as never)
+        const rows = Object.keys(row).length
           ? await tx.update(table).set(row).where(where).returning()
           : await tx.select().from(table).where(where).limit(1)
         if (rows[0]) {
           await applyManyRelationValues(tx, id, relations, primaryKey, tableColumns)
           return (await materialize(rows[0], tx)) as TRecord
         }
-        return rows[0] ? schemas.select.parse(rows[0]) : null
+        return null
       })
     },
     async delete({ id, where: scopeWhere }) {
-      const rows = await database.delete(table).where(and(wherePrimaryKey(id), resolveWriteScope(scopeWhere) as never)).returning()
+      const rows = await database.delete(table).where(and(wherePrimaryKey(id), evaluateScope(scopeWhere, table) as never)).returning()
       return Boolean(rows[0])
     },
     async materialize(input) {
@@ -276,38 +250,29 @@ export function createDrizzleSource<TRecord, TCreate, TUpdate>({
   }
 }
 
-const RESERVED_LIST_QUERY_KEYS = new Set(['page', 'limit', 'search', 'sort', 'order'])
-const DEFAULT_LIST_LIMIT = 20
 const RELATIONAL_ROOT_ALIAS = 'd0'
 
+function evaluateScope(scope: unknown, table: unknown): unknown {
+  return typeof scope === 'function' ? scope(table, operators) : scope
+}
+
+function withRelationalScope(where: Record<string, unknown> | undefined, scope: unknown) {
+  if (!scope) return where
+  const raw = { RAW: scope }
+  return where ? { AND: [where, raw] } : raw
+}
+
 type ListOrdering = {
-  search: string | undefined
   pinnedOrder: CreateDrizzleSourceRead['pinnedOrder']
   order: 'asc' | 'desc'
   sort: string | undefined
 }
 
-function resolveListOrdering(
-  query: Record<string, unknown>,
-  columns: Record<string, AnyColumn>,
-  virtualKeys: Set<string>,
-  pinnedOrder: CreateDrizzleSourceRead['pinnedOrder'],
-): ListOrdering {
-  const search = virtualKeys.has('search') ? undefined : typeof query.search === 'string' && query.search.length ? query.search : undefined
-  const order = query.order === 'desc' ? 'desc' : 'asc'
-  const sort = pinnedOrder || query.sort == null || query.sort === '' ? undefined : String(query.sort)
-  if (sort && !(sort in columns)) throw validationError(`Unknown sort column "${sort}".`)
-  return { search, pinnedOrder, order, sort }
-}
-
 function collectListFilters(query: Record<string, unknown>, columns: Record<string, AnyColumn>, virtualKeys: Set<string>) {
-  const filters: { key: string; value: unknown }[] = []
-  for (const [key, value] of Object.entries(query)) {
-    if (RESERVED_LIST_QUERY_KEYS.has(key) || virtualKeys.has(key) || value === undefined) continue
+  return sourceListFilterEntries(query, virtualKeys).map(([key, value]) => {
     if (!(key in columns)) throw validationError(`Unknown query parameter "${key}".`)
-    filters.push({ key, value: coerceFilterValue(key, columns[key], value) })
-  }
-  return filters
+    return { key, value: coerceFilterValue(key, columns[key], value) }
+  })
 }
 
 function buildListConditions(filters: { key: string; value: unknown }[], search: string | undefined, searchColumnKeys: string[], virtualConditions: SQL[], columns: Record<string, AnyColumn>) {
@@ -338,7 +303,7 @@ function resolveOrderColumns(
   ordering: ListOrdering,
   columns: Record<string, AnyColumn>,
   alias: string | undefined,
-  primaryKey: { key: string; column: AnyColumn }[],
+  primaryKey: readonly PrimaryKeyEntry[],
 ) {
   const visibleOrder = ordering.pinnedOrder
     ? resolvePinnedOrder(ordering.pinnedOrder, columns, alias)
@@ -384,19 +349,7 @@ function resolvePinnedOrder(pinnedOrder: NonNullable<CreateDrizzleSourceRead['pi
   return alias ? pinnedOrder.map((fragment) => mapColumnsInSQLToAlias(fragment, alias)) : pinnedOrder
 }
 
-
-function toPositiveInteger(value: unknown, fallback: number) {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
-}
-
-function hasKeys(value: unknown) {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length)
-}
-
-function splitRelationInput(input: unknown, relationByField: Map<string, DomainRelationField>) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return { row: input, relations: [] as RelationWrite[] }
-
+function splitRelationInput(input: object, relationByField: Map<string, DomainRelationField>) {
   const row: Record<string, unknown> = {}
   const relations: RelationWrite[] = []
   for (const [key, value] of Object.entries(input)) {
@@ -407,14 +360,13 @@ function splitRelationInput(input: unknown, relationByField: Map<string, DomainR
   return { row, relations }
 }
 
-function applyOneRelationValues(row: unknown, relations: RelationWrite[], tableColumns: Record<string, AnyColumn>) {
-  if (!row || typeof row !== 'object' || Array.isArray(row)) return
+function applyOneRelationValues(row: Record<string, unknown>, relations: RelationWrite[], tableColumns: Record<string, AnyColumn>) {
   for (const { relation, value } of relations) {
     if (relation.isArray) continue
     const sourceColumn = onlyColumn(relation.sourceColumns, relation.field)
     const sourceKey = getColumnKey(tableColumns, sourceColumn)
     if (value == null && sourceColumn.notNull) throw validationError(`Relation "${relation.field}" cannot be null because "${sourceKey}" is not nullable.`)
-    ;(row as Record<string, unknown>)[sourceKey] = value == null ? null : getInputColumnValue(relation.targetEntity.table, onlyColumn(relation.targetColumns, relation.field), value, relation.field)
+    row[sourceKey] = value == null ? null : getInputColumnValue(relation.targetEntity.table, onlyColumn(relation.targetColumns, relation.field), value, relation.field)
   }
 }
 
@@ -422,7 +374,7 @@ async function applyManyRelationValues(
   database: DrizzleDb,
   ownerId: unknown,
   relations: RelationWrite[],
-  primaryKey: { key: string; column: AnyColumn }[],
+  primaryKey: readonly PrimaryKeyEntry[],
   tableColumns: Record<string, AnyColumn>,
 ) {
   for (const { relation, value } of relations) {
@@ -473,7 +425,7 @@ async function applyThroughManyRelationValue(
   ownerId: unknown,
   relation: DomainRelationField,
   value: unknown[],
-  primaryKey: { key: string; column: AnyColumn }[],
+  primaryKey: readonly PrimaryKeyEntry[],
   tableColumns: Record<string, AnyColumn>,
 ) {
   if (!relation.throughTable || !relation.throughSourceColumns || !relation.throughTargetColumns) throw validationError(`Relation "${relation.field}" through metadata is incomplete.`)
@@ -520,33 +472,16 @@ function getInputColumnValue(table: unknown, column: AnyColumn, input: unknown, 
   return (input as Record<string, unknown>)[key]
 }
 
-function getOwnerColumnValue(ownerId: unknown, primaryKey: { key: string; column: AnyColumn }[], ownerKey: string) {
+function getOwnerColumnValue(ownerId: unknown, primaryKey: readonly PrimaryKeyEntry[], ownerKey: string) {
   if (primaryKey.length === 1) return ownerId
-  return parseCompositeId(ownerId)[ownerKey]
+  return primaryKeyValues(primaryKey, ownerId)[ownerKey]
 }
 
 function unique(values: unknown[]) {
   return [...new Set(values)]
 }
 
-export function getPrimaryKeyColumns(table: unknown): AnyColumn[] {
-  return getPrimaryKeyEntries(table).map((entry) => entry.column)
-}
-
-function parseCompositeId(id: unknown): Record<string, unknown> {
-  if (id && typeof id === 'object' && !Array.isArray(id)) return id as Record<string, unknown>
-  if (typeof id === 'string') {
-    const value = JSON.parse(id)
-    if (value && typeof value === 'object' && !Array.isArray(value)) return value
-  }
-  throw new Error('Composite primary key id must be an object or JSON object string')
-}
-
-function getReturnedId(row: unknown, primaryKey: { key: string; column: AnyColumn }[]) {
-  return getRowId(row, primaryKey)
-}
-
-function getRowId(row: unknown, primaryKey: { key: string; column: AnyColumn }[]) {
+function getRowId(row: unknown, primaryKey: readonly PrimaryKeyEntry[]) {
   if (!row || typeof row !== 'object') return undefined
   if (primaryKey.length === 1) return ((row as Record<string, unknown>)[primaryKey[0].key] ?? (row as Record<string, unknown>)[primaryKey[0].column.name]) as string
   return Object.fromEntries(primaryKey.map(({ key, column }) => [key, (row as Record<string, unknown>)[key] ?? (row as Record<string, unknown>)[column.name]]))

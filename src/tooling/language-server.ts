@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRouteLanguage } from './language.ts'
+import { createRouteLanguage, type ToolingDiagnostic } from './language.ts'
 import { applyChanges, offsetAt, positionAt, type LspChange as Change, type LspPosition as Position } from './lsp-text.ts'
 
 type Message = { id?: number | string; method?: string; params?: Record<string, unknown> }
@@ -13,15 +13,20 @@ const documents = new Map<string, string>()
 function send(message: unknown) { const body = Buffer.from(JSON.stringify(message)); process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`); process.stdout.write(body) }
 function uriFile(value: unknown) { return fileURLToPath(String(value)) }
 function text(file: string) { return documents.get(file) ?? (existsSync(file) ? readFileSync(file, 'utf8') : '') }
-function diagnosticItems(fileName: string) {
+function diagnosticItems(fileName: string, diagnostics: ToolingDiagnostic[]) {
   const source = text(fileName)
-  return (service?.diagnostics() ?? []).filter((item) => item.fileName === fileName).flatMap((item) => item.pos === undefined || item.end === undefined ? [] : [{ range: { start: positionAt(source, item.pos), end: positionAt(source, item.end) }, severity: 1, code: item.code, message: item.text, source: 'sprindle' }])
+  return diagnostics.flatMap((item) => item.pos === undefined || item.end === undefined ? [] : [{ range: { start: positionAt(source, item.pos), end: positionAt(source, item.end) }, severity: 1, code: item.code, message: item.text, source: 'sprindle' }])
 }
-function diagnostics() {
-  const grouped = new Map<string, ReturnType<NonNullable<typeof service>['diagnostics']>>()
-  for (const item of service?.diagnostics() ?? []) if (item.fileName) grouped.set(item.fileName, [...(grouped.get(item.fileName) ?? []), item])
+function publishDiagnostics() {
+  const grouped = new Map<string, ToolingDiagnostic[]>()
+  for (const item of service?.diagnostics() ?? []) {
+    if (!item.fileName) continue
+    const diagnostics = grouped.get(item.fileName)
+    if (diagnostics) diagnostics.push(item)
+    else grouped.set(item.fileName, [item])
+  }
   for (const fileName of new Set([...published, ...grouped.keys()])) {
-    send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: pathToFileURL(fileName).href, diagnostics: diagnosticItems(fileName) } })
+    send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: pathToFileURL(fileName).href, diagnostics: diagnosticItems(fileName, grouped.get(fileName) ?? []) } })
   }
   published = new Set(grouped.keys())
 }
@@ -34,12 +39,15 @@ function handle(message: Message) {
   if (message.method === 'shutdown') return reply(message.id, null)
   if (message.method === 'exit') { service?.close(); process.exit() }
   const document = params.textDocument as { uri: string; text?: string } | undefined
-  if (message.method === 'textDocument/didOpen' && document?.text !== undefined) { const file = uriFile(document.uri); documents.set(file, document.text); service?.open(file, document.text); diagnostics(); return }
-  if (message.method === 'textDocument/didChange' && document) { const file = uriFile(document.uri); const next = applyChanges(text(file), (params.contentChanges as Change[]) ?? []); documents.set(file, next); service?.open(file, next); diagnostics(); return }
-  if (message.method === 'textDocument/didClose' && document) { const file = uriFile(document.uri); documents.delete(file); service?.closeDocument(file); diagnostics(); return }
-  if (message.method === 'workspace/didChangeWatchedFiles') { diagnostics(); return }
+  if (message.method === 'textDocument/didOpen' && document?.text !== undefined) { const file = uriFile(document.uri); documents.set(file, document.text); service?.open(file, document.text); publishDiagnostics(); return }
+  if (message.method === 'textDocument/didChange' && document) { const file = uriFile(document.uri); const next = applyChanges(text(file), (params.contentChanges as Change[]) ?? []); documents.set(file, next); service?.open(file, next); publishDiagnostics(); return }
+  if (message.method === 'textDocument/didClose' && document) { const file = uriFile(document.uri); documents.delete(file); service?.closeDocument(file); publishDiagnostics(); return }
+  if (message.method === 'workspace/didChangeWatchedFiles') { publishDiagnostics(); return }
   const file = document ? uriFile(document.uri) : ''
-  if (message.method === 'textDocument/diagnostic') return reply(message.id, { kind: 'full', items: diagnosticItems(file) })
+  if (message.method === 'textDocument/diagnostic') {
+    const diagnostics = (service?.diagnostics() ?? []).filter((item) => item.fileName === file)
+    return reply(message.id, { kind: 'full', items: diagnosticItems(file, diagnostics) })
+  }
   const position = offsetAt(text(file), (params.position as Position | undefined) ?? { line: 0, character: 0 })
   if (message.method === 'textDocument/completion') return reply(message.id, service?.completions(file, position).map((entry) => ({ label: entry.name })) ?? [])
   if (message.method === 'textDocument/hover') return reply(message.id, { contents: [{ language: 'typescript', value: service?.type(file, position) ?? 'unknown' }] })

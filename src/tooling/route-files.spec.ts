@@ -26,13 +26,25 @@ test('reads groups, dotted static segments, parameters, scopes, and method expor
   expect(model.routes[1].scopes).toHaveLength(2)
 })
 
-test('puts static routes before parameters and reports both collision files', async () => {
+test('puts a static route before a parameter that could match it', async () => {
   const root = await fixture({
     'users/[id]/+server.ts': 'export const GET = 1',
     'users/me/+server.ts': 'export const GET = 1',
-    '(other)/users/[id]/+server.ts': 'export const GET = 1',
   })
-  await expect(readRouteDirectory(root)).rejects.toThrow(/duplicate GET \/users\/:parameter; also .*\+server\.ts/)
+  const { routes } = await readRouteDirectory(root)
+  expect(routes.map((route) => route.httpPath)).toEqual(['/users/me', '/users/:id'])
+})
+
+test('reports both files when routes declare the same method and path', async () => {
+  const direct = 'users/[id]/+server.ts'
+  const grouped = '(other)/users/[id]/+server.ts'
+  const root = await fixture({
+    [direct]: 'export const GET = 1',
+    [grouped]: 'export const GET = 1',
+  })
+  await expect(readRouteDirectory(root)).rejects.toThrow(
+    `${join(root, direct)}: duplicate GET /users/:parameter; also ${join(root, grouped)}`,
+  )
 })
 
 test('rejects different parameter names on one normalized path across methods', async () => {

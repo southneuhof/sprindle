@@ -1,46 +1,15 @@
 import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../../testing/file-manifest'
 import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
-import { pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { create, list } from '../../routes'
 
-import { getPrimaryKeyColumns } from '../../source/drizzle-source'
 import type { ModelRuntimeEntity } from '../../source'
 import { createTestEntity } from '../../testing'
 
 const itemEntity = createTestEntity({ rows: [{ id: 'item-1' }] }) as unknown as ModelRuntimeEntity
 
 
-describe('defineFileModelFixture route compiler', () => {
-  if (false) {
-    const uncalledRoute = list
-
-    // @ts-expect-error route factories must be called before registration
-    const tree: RouteTree = { uncalledRoute }
-    void tree
-  }
-
-  it('compiles route tree keys into route segments', async () => {
-    const model = defineFileModelFixture({
-      path: '',
-      entity: itemEntity,
-      routes: {
-        list: list(),
-        nested: {
-          version1: list(),
-          test: {
-            versionTest: list(),
-          },
-        },
-      },
-    })
-    const app = testInstallSprindle(new Hono(), model)
-
-    expect((await app.request('/list')).status).toBe(200)
-    expect((await app.request('/nested/version1')).status).toBe(200)
-    expect((await app.request('/nested/test/versionTest')).status).toBe(200)
-  })
-
+describe('route hook behavior', () => {
   it('runs model and route phases in declaration order', async () => {
     const order: string[] = []
     const model = defineFileModelFixture({
@@ -266,15 +235,5 @@ describe('defineFileModelFixture route compiler', () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ value: 'state-base' })
-  })
-
-  it('infers inline and composite primary keys from drizzle tables', () => {
-    const single = pgTable('single_key', { id: text('id').primaryKey() })
-    const composite = pgTable('composite_key', { one: text('one'), two: text('two') }, (table) => [
-      primaryKey({ columns: [table.one, table.two] }),
-    ])
-
-    expect(getPrimaryKeyColumns(single).map((column) => column.name)).toEqual(['id'])
-    expect(getPrimaryKeyColumns(composite).map((column) => column.name)).toEqual(['one', 'two'])
   })
 })

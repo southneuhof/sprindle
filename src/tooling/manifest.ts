@@ -2,15 +2,15 @@ import { createHash, randomUUID } from 'node:crypto'
 import { fork } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import chokidar, { type FSWatcher } from 'chokidar'
 import { build } from 'esbuild'
-import { parse } from 'jsonc-parser'
 import { parse as parseTypeScript } from '@babel/parser'
 import { readRouteDirectory } from './route-files.ts'
 import { atomicWriteIfChanged, generatedRuntimePlugin, routeSourceGraph, sourceInputOrigins, stageRouteSource, verifyRouteSourceIdentity, withRouteGenerationLock } from './source.ts'
 import { createRouteResolutionReceipt, externalPackageTarget, isNodeBuiltin, packageManifestForTarget, resolveRuntimeEdges, routeImportPackageSelectionIsValid, type RouteImportRecord, type RuntimeResolutionContext } from './resolution.ts'
+import { isGenerationDependencies, hasGenerationResultEnvelope, isGenerationResponse, type GenerationRequest, type GenerationResponse } from './generation-protocol.ts'
 import { stopOwnedProcessTree } from './process.ts'
 
 const dependencyInputs = new Map<string, string[]>()
@@ -23,24 +23,10 @@ export type WatchRouteManifestOptions = {
   generationTimeoutMs?: number
 }
 
-export type GenerationRequest = {
-  projectRoot: string
-  routesDirectory: string
-  output: string
-  bundle: boolean
-  dependencyInputs: string[]
-}
-
 type GenerationFailure = Error & { dependencyInputs?: string[]; stopFailed?: boolean }
 type GenerationResult = { target: string; dependencyInputs: string[] }
-type WorkerError = { message: string; stack?: string }
-type WorkerMessage =
-  | { type: 'dependencies'; dependencyInputs: string[] }
-  | { type: 'result'; ok: true; target: string; dependencyInputs: string[] }
-  | { type: 'result'; ok: false; error: WorkerError; dependencyInputs: string[] }
 
-function rejectStaticCycles(projectRoot: string, inputs: Record<string, { imports: { path: string; kind: string; external?: boolean }[] }>) {
-  const graph = new Map(Object.entries(inputs).map(([file, input]) => [file, input.imports.filter((entry) => entry.kind === 'import-statement' && !entry.external && inputs[entry.path]).map((entry) => entry.path).sort()]))
+function rejectStaticCycles(projectRoot: string, graph: ReadonlyMap<string, readonly string[]>) {
   const visited = new Set<string>(), active = new Map<string, number>(), path: string[] = []
   const shown = (file: string) => relative(realpathSync(projectRoot), isAbsolute(file) ? file : existsSync(resolve(file)) ? resolve(file) : resolve(projectRoot, file)).replaceAll(sep, '/')
   const visit = (file: string): string[] | undefined => {
@@ -48,27 +34,17 @@ function rejectStaticCycles(projectRoot: string, inputs: Record<string, { import
     if (start !== undefined) return [...path.slice(start), file]
     if (visited.has(file)) return
     visited.add(file); active.set(file, path.length); path.push(file)
-    for (const dependency of graph.get(file) ?? []) { const cycle = visit(dependency); if (cycle) return cycle }
+    for (const dependency of graph.get(file) ?? []) {
+      if (!graph.has(dependency)) continue
+      const cycle = visit(dependency)
+      if (cycle) return cycle
+    }
     path.pop(); active.delete(file)
   }
   for (const file of [...graph.keys()].sort()) {
     const cycle = visit(file)
     if (cycle) throw new Error(`Static local import cycle: ${cycle.map(shown).join(' -> ')}. Move shared declarations into a module that does not import the service.`)
   }
-}
-
-async function configInputs(configFile: string, seen = new Set<string>()): Promise<string[]> {
-  const file = resolve(configFile)
-  if (seen.has(file)) return []
-  seen.add(file)
-  const source = await readFile(file, 'utf8')
-  const value = parse(source) as { extends?: string | string[] } | undefined
-  const extended = typeof value?.extends === 'string' ? [value.extends] : value?.extends ?? []
-  const parents = extended.filter((entry) => entry.startsWith('.') || isAbsolute(entry)).map((entry) => {
-    const target = resolve(dirname(file), entry)
-    return extname(target) ? target : `${target}.json`
-  })
-  return [file, ...(await Promise.all(parents.map((parent) => configInputs(parent, seen)))).flat()]
 }
 
 function edgeKind(kind: string) {
@@ -160,22 +136,23 @@ function bundleRuntimeSelections(project: string, runtimeFile: string, generated
   return { externalEdges, externalContexts }
 }
 
-async function resolutionInputs(sourceGraph: Awaited<ReturnType<typeof routeSourceGraph>>, configFiles: string[]) {
-  const files = new Set([...sourceGraph.graph.keys(), ...configFiles])
+async function resolutionInputs(sourceGraph: Awaited<ReturnType<typeof routeSourceGraph>>) {
+  const configContents = new Map(sourceGraph.configInputs.map(({ file, contents }) => [file, contents]))
+  const files = new Set([...sourceGraph.graph.keys(), ...configContents.keys()])
   for (const edge of sourceGraph.importEdges) {
     for (const target of [...edge.typeTargets, ...(edge.runtimeTarget && !edge.runtimeTarget.startsWith('node:') ? [edge.runtimeTarget] : [])]) {
       const manifest = packageManifestForTarget(target)
       if (manifest) files.add(manifest)
     }
   }
-  return new Map(await Promise.all([...files].sort().map(async (file) => [file, sourceGraph.contents.get(file) ?? sourceGraph.settingsInputs.get(file) ?? await readFile(file, 'utf8')] as const)))
+  return new Map(await Promise.all([...files].sort().map(async (file) => [file, configContents.get(file) ?? sourceGraph.contents.get(file) ?? await readFile(file, 'utf8')] as const)))
 }
 
 export async function compileRouteManifest(projectRoot: string, routesDirectory = 'routes', output = '.sprindle/routes.mjs', bundle = true) {
   return withRouteGenerationLock(projectRoot, () => compileRouteManifestLocked(projectRoot, routesDirectory, output, bundle))
 }
 
-export async function runRouteManifestGeneration(request: GenerationRequest, onDependencyInputs: (inputs: string[]) => void, signal?: AbortSignal) {
+export async function runRouteManifestGeneration(request: GenerationRequest, onDependencyInputs: (inputs: string[]) => void, signal?: AbortSignal): Promise<GenerationResponse> {
   const project = resolve(request.projectRoot)
   dependencyInputs.set(project, [...request.dependencyInputs])
   const updateInputs = (inputs: string[]) => {
@@ -188,11 +165,11 @@ export async function runRouteManifestGeneration(request: GenerationRequest, onD
   }
   try {
     const target = await withRouteGenerationLock(project, () => compileRouteManifestLocked(project, request.routesDirectory, request.output, request.bundle, assertConnected, updateInputs, signal))
-    return { type: 'result', ok: true as const, target, dependencyInputs: dependencyInputs.get(project) ?? request.dependencyInputs }
+    return { type: 'result', ok: true, target, dependencyInputs: dependencyInputs.get(project) ?? request.dependencyInputs }
   } catch (error) {
     return {
       type: 'result',
-      ok: false as const,
+      ok: false,
       error: { message: error instanceof Error ? error.message : String(error), ...(error instanceof Error && error.stack ? { stack: error.stack } : {}) },
       dependencyInputs: dependencyInputs.get(project) ?? request.dependencyInputs,
     }
@@ -217,14 +194,11 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
     const provisionalSource = generated.manifestSource(placeholder)
     await writeFile(generated.entryFile, provisionalSource)
     const graph = sourceGraph.graph
-    for (const [file, contents] of generated.settingsInputs) if (sourceGraph.settingsInputs.get(file) !== contents) throw new Error(`Sprindle TypeScript config changed during generation: ${relative(project, file)}. Run the route producer again.`)
-    if (sourceGraph.settingsInputs.size !== generated.settingsInputs.size) throw new Error('Sprindle TypeScript config inputs changed during generation. Run the route producer again.')
-    const configFiles = await configInputs(resolve(project, 'tsconfig.json'))
+    const configFiles = sourceGraph.configInputs.map(({ file }) => file)
     const runtimeInputs = [...new Set([...sourceGraph.runtimeInputs, ...configFiles])].sort()
     dependencyInputs.set(project, runtimeInputs)
     onDependencyInputs?.(runtimeInputs)
-    const cycleInputs = Object.fromEntries([...graph.keys()].map((file) => [file, { imports: (sourceGraph.staticGraph.get(file) ?? []).map((path) => ({ path, kind: 'import-statement' })) }]))
-    rejectStaticCycles(project, cycleInputs)
+    rejectStaticCycles(project, sourceGraph.staticGraph)
     const runtimeFile = bundle ? target : resolve(generated.directory, 'routes.mjs')
     const buildOutput = bundle ? temporary : runtimeFile
     const buildOutputDirectory = existingRealPath(dirname(buildOutput))
@@ -258,7 +232,7 @@ async function compileRouteManifestLocked(projectRoot: string, routesDirectory: 
         throw new Error(`${edge.importer}: API runtime selected ${edge.runtimeTarget ?? 'unresolved'} and API compiler selected ${edge.typeTargets.join(', ') || 'unresolved'} for ${edge.specifier}, but its declared package mapping does not relate those targets.`)
       }
     }
-    const inputContents = await resolutionInputs(sourceGraph, configFiles)
+    const inputContents = await resolutionInputs(sourceGraph)
     const finalInputs = [...new Set([...runtimeInputs, ...[...inputContents.keys()].filter((file) => basename(file) === 'package.json')])].sort()
     dependencyInputs.set(project, finalInputs)
     onDependencyInputs?.(finalInputs)
@@ -400,10 +374,6 @@ function containedRelativePathOrUndefined(root: string, file: string) {
   return isAbsolute(path) || path.split(sep).includes('..') ? undefined : path
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-}
-
 function watchSupervisorPath() {
   const source = import.meta.url.endsWith('.ts')
   return { file: fileURLToPath(new URL(source ? './generation-supervisor.ts' : './generation-supervisor.js', import.meta.url)), source }
@@ -419,7 +389,7 @@ function runWatcherGeneration(request: GenerationRequest, timeoutMs: number, sig
     execArgv: supervisor.source ? ['--experimental-strip-types'] : [],
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
   })
-  let output = '', response: Extract<WorkerMessage, { type: 'result' }> | undefined, stopReason: Error | undefined, stopTask: Promise<void> | undefined, disconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let output = '', response: GenerationResponse | undefined, stopReason: Error | undefined, stopTask: Promise<void> | undefined, disconnectTimer: ReturnType<typeof setTimeout> | undefined
   let settled = false
   let resolveGeneration!: (result: GenerationResult) => void
   let rejectGeneration!: (error: Error) => void
@@ -466,24 +436,18 @@ function runWatcherGeneration(request: GenerationRequest, timeoutMs: number, sig
   child.stderr?.on('data', (chunk: Buffer) => { output = `${output}${chunk.toString('utf8')}`.slice(-65_536) })
   child.once('error', (error) => settle(new Error(`Route manifest generation could not start for ${target} in ${project}.`, { cause: error })))
   child.on('message', (message: unknown) => {
-    if (!message || typeof message !== 'object') return
-    const value = message as Partial<WorkerMessage>
-    if (value.type === 'dependencies' && isStringArray(value.dependencyInputs)) {
-      dependencyInputs.set(project, value.dependencyInputs)
+    if (isGenerationDependencies(message)) {
+      dependencyInputs.set(project, message.dependencyInputs)
       return
     }
-    if (value.type !== 'result' || !isStringArray(value.dependencyInputs)) return
-    if (value.ok === true && typeof value.target === 'string') {
-      dependencyInputs.set(project, value.dependencyInputs)
-      response = value as Extract<WorkerMessage, { type: 'result' }>
+    if (isGenerationResponse(message)) {
+      dependencyInputs.set(project, message.dependencyInputs)
+      response = message
       return
     }
-    if (value.ok === false && value.error && typeof value.error === 'object' && typeof value.error.message === 'string') {
-      dependencyInputs.set(project, value.dependencyInputs)
-      response = value as Extract<WorkerMessage, { type: 'result' }>
-      return
+    if (hasGenerationResultEnvelope(message)) {
+      void stop(new Error(`Route manifest generation returned an invalid result for ${target} in ${project}.`)).catch(() => {})
     }
-    void stop(new Error(`Route manifest generation returned an invalid result for ${target} in ${project}.`)).catch(() => {})
   })
   child.once('disconnect', () => {
     disconnectTimer = setTimeout(() => {

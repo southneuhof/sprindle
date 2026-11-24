@@ -1,11 +1,5 @@
-import type { Context, MiddlewareHandler } from 'hono'
-import type { ModelRuntimeContext } from '../source'
-
-export const MODEL_ROUTE = Symbol('MODEL_ROUTE')
-export declare const MODEL_ROUTE_TYPES: unique symbol
-
-export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete'
-export type AnyInput = Record<string, unknown>
+import type { Context } from 'hono'
+import type { ModelRuntimeContext } from '../source/model-source'
 
 export type RouteHandlerArgs<
   TContext extends ModelRuntimeContext = ModelRuntimeContext,
@@ -36,43 +30,4 @@ export type RoutePipeline<TArgs extends RouteHandlerArgs = RouteHandlerArgs> = {
   validate?: RouteValidate<TArgs> | RouteValidate<TArgs>[]
   after?: RouteAfter<TArgs> | RouteAfter<TArgs>[]
   error?: RouteError<TArgs> | RouteError<TArgs>[]
-}
-
-export type BoundModelRoute = {
-  method: HttpMethod
-  path: string
-  middleware: MiddlewareHandler[]
-  handler: (c: Context) => Response | Promise<Response>
-}
-
-export type ModelRoute<
-  TContext extends ModelRuntimeContext = ModelRuntimeContext,
-  TMethod extends HttpMethod = HttpMethod,
-  TPath extends string = string,
-  _TInput extends AnyInput = AnyInput,
-  _TOutput = unknown,
-> = {
-  readonly [MODEL_ROUTE]: true
-  readonly method: TMethod
-  readonly path: TPath
-  readonly openapi?: { requestBody?: unknown }
-  bind: (context: TContext) => BoundModelRoute
-} & {
-  readonly [MODEL_ROUTE_TYPES]?: {
-    readonly input: _TInput
-    readonly output: _TOutput
-  }
-}
-
-export type ModelRouteInput<TRoute extends ModelRoute> = TRouterTypes<TRoute>['input']
-export type ModelRouteOutput<TRoute extends ModelRoute> = TRouterTypes<TRoute>['output']
-
-type TRouterTypes<TRoute extends ModelRoute> = TRoute extends { readonly [MODEL_ROUTE_TYPES]?: infer TTypes }
-  ? TTypes extends { input: infer TInput; output: infer TOutput }
-    ? { input: TInput; output: TOutput }
-    : { input: never; output: never }
-  : { input: never; output: never }
-
-export function isModelRoute(value: unknown): value is ModelRoute {
-  return typeof value === 'object' && value !== null && (value as { [MODEL_ROUTE]?: unknown })[MODEL_ROUTE] === true
 }

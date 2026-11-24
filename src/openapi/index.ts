@@ -1,7 +1,7 @@
 import { z } from 'zod/v4'
-import { getRouteManifest, type FileRouteManifest } from '../hono'
-import { isFileRoute } from '../routes'
-import { resolveScopeMetadata } from '../hono/file-routes'
+import { getRouteManifest, type FileRouteManifest } from '../hono/route-manifest'
+import { resolveScopeMetadata } from '../model/scope-metadata'
+import { isFileRoute } from '../routes/define-route'
 
 export type OpenApiInfo = { title: string; version: string }
 export type OpenApiDocument = { openapi: '3.1.0'; info: OpenApiInfo; paths: Record<string, Record<string, unknown>>; components: { schemas: Record<string, unknown> } }

@@ -10,21 +10,26 @@ import { readRouteDirectory, type RouteDirectory } from './route-files.ts'
 import { externalPackageTarget, isNodeBuiltin, openCompilerResolver, resolveRuntimeEdges, type RouteImportRecord } from './resolution.ts'
 
 type PathMapping = { pattern: string; targets: string[]; base: string }
-type ResolverSettings = { moduleSuffixes: string[]; paths: PathMapping[]; baseUrl?: string; inputs: Map<string, string> }
+type ResolverSettings = { moduleSuffixes: string[]; paths: PathMapping[]; baseUrl?: string }
+type ConfigSettings = {
+  extends?: string | string[]
+  compilerOptions?: Record<string, unknown>
+  files?: unknown
+  include?: unknown
+  exclude?: unknown
+}
+type ConfigInput = { file: string; contents: string; settings: ConfigSettings | undefined }
 type ModuleSpecifier = { node: { start?: number | null; end?: number | null; value?: unknown }; value: string; kind: 'static' | 'dynamic' | 'require' | 'type'; callee?: { start?: number | null; end?: number | null } }
 type ParsedModule = { program: { body: unknown[] }; comments?: { value: string; start?: number | null; end?: number | null }[] | null }
 type RouteSourceGraph = Awaited<ReturnType<typeof routeSourceGraph>>
 type StagedRouteSource = {
   directory: string
   readonly versionDirectory: string
-  readonly version: string
   entryFile: string
   manifestSource(hash?: string): string
   pointerSource(hash: string): string
   originals: Map<string, string>
-  settingsInputs: Map<string, string>
   origins: Map<string, string>
-  entryModules: Map<string, string>
   runtimeSources: Map<string, string>
   runtimeImportSpecifiers: Map<RouteImportRecord, string>
   addGeneratedFile(file: string, contents: string): Promise<void>
@@ -229,12 +234,9 @@ export async function stageRouteSource(projectRoot: string, model: RouteDirector
     manifestSource,
     pointerSource,
     originals,
-    settingsInputs: settings.inputs,
     origins,
-    entryModules,
     runtimeSources,
     runtimeImportSpecifiers,
-    get version() { return version },
     get versionDirectory() { return versionDirectory },
     async addGeneratedFile(file, contents) {
       const target = resolve(stageRoot, file)
@@ -299,8 +301,9 @@ export function generatedRuntimePlugin(graph: RouteSourceGraph, source: StagedRo
 
 export async function routeSourceGraph(projectRoot: string, model: RouteDirectory, runtimeMode: 'bundle' | 'source' = 'bundle') {
   const project = resolve(projectRoot)
-  const settings = await resolverSettings(project)
-  const ambientSources = await ambientTypeSources(project)
+  const configInputs = await readConfigInputs(resolve(project, 'tsconfig.json'))
+  const settings = resolverSettings(configInputs)
+  const ambientSources = ambientTypeSources(project, configInputs)
   const entryFiles = [...new Set([...model.scopes, ...model.routes.map((route) => route.sourcePath)])].map((file) => resolve(file))
   const pending = [...new Set([...entryFiles, ...ambientSources])]
   const graph = new Map<string, string[]>()
@@ -412,7 +415,7 @@ export async function routeSourceGraph(projectRoot: string, model: RouteDirector
     runtimeInputs.add(file)
     runtimePending.push(...(runtimeGraph.get(file) ?? []))
   }
-  return { graph, runtimeGraph, staticGraph, runtimeInputs, contents, parsed: parsedSources, settingsInputs: settings.inputs, settings, ambientSources, importEdges, graphEdgeTargets, runtimeMode, producerCompiler: compiler.version, producerModuleResolution: compiler.moduleResolution, customConditions: compiler.customConditions }
+  return { graph, staticGraph, runtimeInputs, contents, parsed: parsedSources, configInputs, settings, ambientSources, importEdges, graphEdgeTargets, runtimeMode, producerCompiler: compiler.version, producerModuleResolution: compiler.moduleResolution, customConditions: compiler.customConditions }
 }
 
 export async function verifyRouteSourceIdentity(projectRoot: string, model: RouteDirectory, source: StagedRouteSource, snapshots: Map<string, string>) {
@@ -899,17 +902,13 @@ function helperSource(generated: string, metadata: ReturnType<typeof routeBindin
   return runtime
 }
 
-async function resolverSettings(project: string): Promise<ResolverSettings> {
-  const chain = await configChain(resolve(project, 'tsconfig.json'))
+function resolverSettings(configInputs: ConfigInput[]): ResolverSettings {
   let baseUrl: string | undefined
   let moduleSuffixes = ['']
   const paths = new Map<string, PathMapping>()
-  const inputs = new Map<string, string>()
-  for (const file of chain) {
+  for (const { file, settings } of configInputs) {
     const directory = dirname(file)
-    const contents = readFileSync(file, 'utf8')
-    inputs.set(file, contents)
-    const options = (parseJsonc(contents) as { compilerOptions?: Record<string, unknown> } | undefined)?.compilerOptions
+    const options = settings?.compilerOptions
     if (!options) continue
     if (typeof options.baseUrl === 'string') baseUrl = resolve(directory, options.baseUrl)
     if (Array.isArray(options.moduleSuffixes) && options.moduleSuffixes.every((value) => typeof value === 'string')) moduleSuffixes = options.moduleSuffixes as string[]
@@ -918,20 +917,18 @@ async function resolverSettings(project: string): Promise<ResolverSettings> {
       for (const [pattern, targets] of Object.entries(options.paths as Record<string, unknown>)) if (Array.isArray(targets) && targets.every((target) => typeof target === 'string')) paths.set(pattern, { pattern, targets: targets as string[], base })
     }
   }
-  return { moduleSuffixes, paths: [...paths.values()].sort((left, right) => specificity(right.pattern) - specificity(left.pattern)), baseUrl, inputs }
+  return { moduleSuffixes, paths: [...paths.values()].sort((left, right) => specificity(right.pattern) - specificity(left.pattern)), baseUrl }
 }
 
-async function ambientTypeSources(project: string) {
-  const chain = await configChain(resolve(project, 'tsconfig.json'))
+function ambientTypeSources(project: string, configInputs: ConfigInput[]) {
   let files: { values: string[]; base: string } | undefined
   let include: { values: string[]; base: string } | undefined
   let exclude: { values: string[]; base: string } | undefined
-  for (const config of chain) {
-    const value = parseJsonc(await readFile(config, 'utf8')) as { files?: unknown; include?: unknown; exclude?: unknown } | undefined
+  for (const { file, settings } of configInputs) {
     for (const key of ['files', 'include', 'exclude'] as const) {
-      const setting = value?.[key]
+      const setting = settings?.[key]
       if (!Array.isArray(setting) || !setting.every((entry) => typeof entry === 'string')) continue
-      const selected = { values: setting as string[], base: dirname(config) }
+      const selected = { values: setting, base: dirname(file) }
       if (key === 'files') files = selected
       if (key === 'include') include = selected
       if (key === 'exclude') exclude = selected
@@ -983,21 +980,21 @@ function matchesGlob(pattern: string, base: string, file: string) {
   return new RegExp(`${source}$`).test(candidate)
 }
 
-async function configChain(file: string, seen = new Set<string>()): Promise<string[]> {
+async function readConfigInputs(file: string, seen = new Set<string>()): Promise<ConfigInput[]> {
   const target = resolve(file)
   if (seen.has(target) || !existsSync(target)) return []
   seen.add(target)
-  const value = parseJsonc(await readFile(target, 'utf8')) as { extends?: string | string[] } | undefined
-  const extended = typeof value?.extends === 'string' ? [value.extends] : value?.extends ?? []
+  const contents = await readFile(target, 'utf8')
+  const settings: ConfigSettings | undefined = parseJsonc(contents)
+  const extended = typeof settings?.extends === 'string' ? [settings.extends] : settings?.extends ?? []
   const parents = await Promise.all(extended.map(async (parent) => {
     if (!parent.startsWith('.') && !isAbsolute(parent)) return []
     let resolved = resolve(dirname(target), parent)
     if (!extname(resolved)) resolved = `${resolved}.json`
-    if (existsSync(resolved)) return configChain(resolved, seen)
-    const directoryConfig = resolve(dirname(target), parent, 'tsconfig.json')
-    return existsSync(directoryConfig) ? configChain(directoryConfig, seen) : []
+    if (existsSync(resolved)) return readConfigInputs(resolved, seen)
+    return readConfigInputs(resolve(dirname(target), parent, 'tsconfig.json'), seen)
   }))
-  return [...parents.flat(), target]
+  return [...parents.flat(), { file: target, contents, settings }]
 }
 
 function specificity(pattern: string) {

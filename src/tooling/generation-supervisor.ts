@@ -1,38 +1,10 @@
-import { fork, type ChildProcess } from 'node:child_process'
-import { spawnSync } from 'node:child_process'
+import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import type { GenerationRequest } from './manifest.ts'
-
-type WorkerMessage =
-  | { type: 'dependencies'; dependencyInputs: string[] }
-  | { type: 'result'; ok: true; target: string; dependencyInputs: string[] }
-  | { type: 'result'; ok: false; error: { message: string; stack?: string }; dependencyInputs: string[] }
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-}
-
-function isRequest(value: unknown): value is GenerationRequest {
-  if (!value || typeof value !== 'object') return false
-  const request = value as Partial<GenerationRequest>
-  return typeof request.projectRoot === 'string'
-    && typeof request.routesDirectory === 'string'
-    && typeof request.output === 'string'
-    && typeof request.bundle === 'boolean'
-    && isStringArray(request.dependencyInputs)
-}
-
-function isResult(value: unknown): value is Extract<WorkerMessage, { type: 'result' }> {
-  if (!value || typeof value !== 'object') return false
-  const result = value as Partial<Extract<WorkerMessage, { type: 'result' }>>
-  return result.type === 'result' && isStringArray(result.dependencyInputs)
-    && (result.ok === true && typeof result.target === 'string'
-      || result.ok === false && typeof result.error?.message === 'string')
-}
+import { isGenerationDependencies, isGenerationRequest, isGenerationResponse, type GenerationResponse } from './generation-protocol.ts'
 
 let worker: ChildProcess | undefined
 let dependencyInputs: string[] = []
-let result: Extract<WorkerMessage, { type: 'result' }> | undefined
+let result: GenerationResponse | undefined
 let failure: Error | undefined
 let completed = false
 let stopping = false
@@ -56,7 +28,7 @@ function stopOwnedTree() {
   }
 }
 
-function sendResult(value: Extract<WorkerMessage, { type: 'result' }>) {
+function sendResult(value: GenerationResponse) {
   completed = true
   if (!process.connected) return
   process.send?.(value, () => process.disconnect?.())
@@ -64,7 +36,7 @@ function sendResult(value: Extract<WorkerMessage, { type: 'result' }>) {
 
 process.once('disconnect', stopOwnedTree)
 process.once('message', (message: unknown) => {
-  if (!isRequest(message)) {
+  if (!isGenerationRequest(message)) {
     sendResult({ type: 'result', ok: false, error: { message: 'The route watcher sent an invalid generation request.' }, dependencyInputs })
     return
   }
@@ -78,14 +50,12 @@ process.once('message', (message: unknown) => {
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
   })
   worker.on('message', (value: unknown) => {
-    if (!value || typeof value !== 'object') return
-    const item = value as Partial<WorkerMessage>
-    if (item.type === 'dependencies' && isStringArray(item.dependencyInputs)) {
-      dependencyInputs = item.dependencyInputs
-      if (process.connected) process.send?.({ type: 'dependencies', dependencyInputs }, () => {})
+    if (isGenerationDependencies(value)) {
+      dependencyInputs = value.dependencyInputs
+      if (process.connected) process.send?.(value, () => {})
       return
     }
-    if (isResult(value)) {
+    if (isGenerationResponse(value)) {
       dependencyInputs = value.dependencyInputs
       result = value
     }

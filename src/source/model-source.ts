@@ -16,7 +16,6 @@ export type ModelRuntimeContext<TTable = unknown, TEnrich extends ModelRecordEnr
   entity: ModelRuntimeEntity<TTable>
   enrich?: TEnrich
   identity?: IdentityResolver
-  /** Merged composition pipeline (install + bundle + model scopes); assigned at install time. */
   pipeline?: RoutePipeline
 }
 

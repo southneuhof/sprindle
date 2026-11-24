@@ -1,15 +1,5 @@
-import { runRouteManifestGeneration, type GenerationRequest } from './manifest.ts'
-
-function isRequest(value: unknown): value is GenerationRequest {
-  if (!value || typeof value !== 'object') return false
-  const request = value as Partial<GenerationRequest>
-  return typeof request.projectRoot === 'string'
-    && typeof request.routesDirectory === 'string'
-    && typeof request.output === 'string'
-    && typeof request.bundle === 'boolean'
-    && Array.isArray(request.dependencyInputs)
-    && request.dependencyInputs.every((input) => typeof input === 'string')
-}
+import { isGenerationRequest, type GenerationDependencies } from './generation-protocol.ts'
+import { runRouteManifestGeneration } from './manifest.ts'
 
 let received = false
 const cancellation = new AbortController()
@@ -22,14 +12,15 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => ca
 
 process.once('message', (message: unknown) => {
   received = true
-  if (!isRequest(message)) {
+  if (!isGenerationRequest(message)) {
     process.exitCode = 1
     process.disconnect?.()
     return
   }
   const sendDependencies = (dependencyInputs: string[]) => {
     if (!process.connected) return
-    process.send?.({ type: 'dependencies', dependencyInputs }, () => {})
+    const message: GenerationDependencies = { type: 'dependencies', dependencyInputs }
+    process.send?.(message, () => {})
   }
   void runRouteManifestGeneration(message, sendDependencies, cancellation.signal).then((result) => {
     if (!process.connected) return

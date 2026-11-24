@@ -5,7 +5,8 @@ test('maps UTF-16 positions through multiline CRLF text', () => {
   const source = 'café 🚀\r\nsecond\r\n'
   const position = { line: 0, character: 7 }
   expect(source.slice(0, offsetAt(source, position))).toBe('café 🚀')
-  expect(positionAt(source, offsetAt(source, position))).toEqual(position)
+  expect(positionAt(source, 7)).toEqual(position)
+  expect(positionAt(source, 12)).toEqual({ line: 1, character: 3 })
   expect(offsetAt(source, { line: 1, character: 3 })).toBe(source.indexOf('second') + 3)
 })
 

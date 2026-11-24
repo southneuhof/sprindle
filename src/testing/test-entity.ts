@@ -30,10 +30,9 @@ export function createTestEntity<TRecord extends Record<string, unknown> = Recor
   } as TestEntity<TRecord>
 }
 
-/** `installSprindle` on a fresh Hono app — go straight to `app.request(...)`. */
 export function testApp(
   installables: FileRouteManifest,
   options?: SprindleInstallOptions,
 ) {
-  return installSprindle(new Hono(), installables as never, options)
+  return installSprindle(new Hono(), installables, options)
 }

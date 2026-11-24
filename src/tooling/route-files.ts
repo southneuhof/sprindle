@@ -29,11 +29,11 @@ export function exportedNames(source: string) {
   for (const statement of program.program.body) {
     if (statement.type === 'ExportDefaultDeclaration') { names.push('default'); continue }
     if (statement.type !== 'ExportNamedDeclaration') continue
-    if (statement.type === 'ExportNamedDeclaration' && statement.declaration?.type === 'VariableDeclaration') for (const declaration of statement.declaration.declarations) {
+    if (statement.declaration?.type === 'VariableDeclaration') for (const declaration of statement.declaration.declarations) {
       if (declaration.id.type === 'Identifier') names.push(declaration.id.name)
     }
-    if (statement.type === 'ExportNamedDeclaration' && statement.declaration && 'id' in statement.declaration && statement.declaration.id?.type === 'Identifier') names.push(statement.declaration.id.name)
-    if (statement.type === 'ExportNamedDeclaration') for (const specifier of statement.specifiers) if (specifier.exported.type === 'Identifier') names.push(specifier.exported.name)
+    if (statement.declaration && 'id' in statement.declaration && statement.declaration.id?.type === 'Identifier') names.push(statement.declaration.id.name)
+    for (const specifier of statement.specifiers) if (specifier.exported.type === 'Identifier') names.push(specifier.exported.name)
   }
   return names
 }
@@ -55,6 +55,11 @@ export function routeFileLocation(root: string, file: string) {
   return { segments, parameters, httpPath: `/${url.join('/')}` }
 }
 
+export function scopeCandidates(root: string, segments: readonly string[]): string[] {
+  return [root, ...segments.map((_, index) => join(root, ...segments.slice(0, index + 1)))]
+    .map((directory) => join(directory, '+scope.ts'))
+}
+
 export async function readRouteDirectory(root: string): Promise<RouteDirectory> {
   const files = await walk(root)
   const scopes = files.filter((file) => file.endsWith(`${sep}+scope.ts`))
@@ -62,6 +67,7 @@ export async function readRouteDirectory(root: string): Promise<RouteDirectory> 
     const exports = exportedNames(await readFile(scope, 'utf8'))
     if (exports.length !== 1 || exports[0] !== 'default') throw new Error(`${scope}: scope must export only a default definition`)
   }
+  const scopeFiles = new Set(scopes)
   const routes: RouteFile[] = []
   const seen = new Map<string, string>()
   const pathParameters = new Map<string, { parameters: string[]; sourcePath: string }>()
@@ -71,15 +77,14 @@ export async function readRouteDirectory(root: string): Promise<RouteDirectory> 
     const invalid = exports.filter((name) => !HTTP_METHODS.includes(name as HttpExport))
     if (invalid.length) throw new Error(`${sourcePath}: invalid reserved export ${invalid[0]}`)
     const methods = exports.filter((name): name is HttpExport => HTTP_METHODS.includes(name as HttpExport))
-    const ancestors = [root, ...segments.map((_, index) => join(root, ...segments.slice(0, index + 1)))]
-      .map((directory) => join(directory, '+scope.ts')).filter((file) => scopes.includes(file))
+    const ancestors = scopeCandidates(root, segments).filter((file) => scopeFiles.has(file))
+    const pathKey = httpPath.replace(/:[^/]+/g, ':parameter')
     for (const method of methods) {
-      const normalized = `${method} ${httpPath.replace(/:[^/]+/g, ':parameter')}`
+      const normalized = `${method} ${pathKey}`
       const other = seen.get(normalized)
       if (other) throw new Error(`${sourcePath}: duplicate ${normalized}; also ${other}`)
       seen.set(normalized, sourcePath)
     }
-    const pathKey = httpPath.replace(/:[^/]+/g, ':parameter')
     const previousPath = pathParameters.get(pathKey)
     if (previousPath && previousPath.parameters.join('/') !== parameters.join('/')) throw new Error(`${sourcePath}: parameter names for ${pathKey} conflict with ${previousPath.sourcePath}`)
     pathParameters.set(pathKey, previousPath ?? { parameters, sourcePath })

@@ -1,12 +1,6 @@
-export { defineRoute } from './define-route'
-export { isFileRoute } from './define-route'
+export { create, defineRoute, deleteRoute, detail, isFileRoute, list, update } from './define-route'
 export { defineScope, isFileScope } from './define-scope'
 export { authenticated } from './authenticated'
-export { create } from './create'
-export { deleteRoute } from './delete'
-export { detail } from './detail'
-export { list } from './list'
-export { update } from './update'
 export type { RecordEnrich } from './record-enrich'
 export type * from './definition'
 

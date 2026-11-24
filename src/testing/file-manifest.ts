@@ -1,9 +1,7 @@
 import { z } from 'zod/v4'
 import { defineRoute as runtimeDefineRoute, isFileRoute, type RuntimeRouteDefinition } from '../routes/define-route'
 import { defineScope } from '../routes/define-scope'
-import type { FileRouteManifest, FileRouteManifestEntry } from '../hono/file-routes'
-import { installSprindle } from '../hono'
-import { generateOpenApi } from '../openapi'
+import { installSprindle, type FileRouteManifest, type FileRouteManifestEntry } from '../hono'
 import type { Hono } from 'hono'
 
 type FixtureConfig = Record<string, unknown> & { path: string; entity?: Record<string, unknown>; routes: Record<string, unknown> }
@@ -32,10 +30,6 @@ export function defineFileModelFixture(config: FixtureConfig): FileRouteManifest
   return entries
 }
 
-export function mergeFileManifests(...values: readonly (FileRouteManifest | readonly FileRouteManifest[])[]): FileRouteManifest {
-  return values.flat(2) as FileRouteManifestEntry[]
-}
-
 export function testDefineModule<T extends { pipeline?: Record<string, unknown>; models: readonly FileRouteManifest[] }>(value: T) {
   if (!value.pipeline) return value
   const scope = defineScope(value.pipeline as never)
@@ -44,10 +38,6 @@ export function testDefineModule<T extends { pipeline?: Record<string, unknown>;
 
 export function testInstallSprindle<TApp extends Hono<any, any>>(app: TApp, values: unknown, options?: Parameters<typeof installSprindle>[2]) {
   return installSprindle(app, collect(values), options)
-}
-
-export function testGenerateOpenApi(values: unknown, info: Parameters<typeof generateOpenApi>[1]) {
-  return generateOpenApi(collect(values), info)
 }
 
 function collect(value: unknown): FileRouteManifest {

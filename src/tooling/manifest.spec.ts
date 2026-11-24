@@ -17,17 +17,6 @@ vi.mock('esbuild', async (importOriginal) => {
   return { ...actual, build: vi.fn(actual.build) }
 })
 
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>()
-  const seen: unknown[] = []
-  ;(globalThis as Record<string, unknown>).__manifestLinkKinds = seen
-  const symlinkSync = ((target: string, path: string, type?: unknown) => {
-    seen.push(type)
-    return actual.symlinkSync(target, path, (type === 'junction' ? 'dir' : type) as 'dir')
-  }) as typeof actual.symlinkSync
-  return { ...actual, symlinkSync }
-})
-
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
@@ -434,7 +423,6 @@ test('watch close cancels a pending edit without reopening handles', { timeout: 
 })
 
 test('watch fires on new route directory add', { timeout: 120_000 }, async () => {
-  // A new route directory must start a compile.
   const root = fixture(); const callbacks: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
   try {
@@ -445,7 +433,6 @@ test('watch fires on new route directory add', { timeout: 120_000 }, async () =>
 })
 
 test('watch fires on route directory rename', { timeout: 120_000 }, async () => {
-  // A renamed route directory must start a compile.
   const root = fixture(); const callbacks: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
   try {
@@ -457,22 +444,31 @@ test('watch fires on route directory rename', { timeout: 120_000 }, async () => 
   } finally { await watcher.close() }
 })
 
-test('watch fires on route file delete', { timeout: 120_000 }, async () => {
-  // A deleted route file must start a compile.
-  const root = fixture(); const callbacks: (Error | undefined)[] = []
+test('watch publishes a manifest without the deleted route', { timeout: 120_000 }, async () => {
+  const root = fixture()
+  const kept = join(root, 'routes', 'kept', '+server.ts')
+  mkdirSync(dirname(kept))
+  writeFileSync(kept, `export const GET = () => 'kept'`)
+  const callbacks: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
+  const target = pathToFileURL(join(root, '.sprindle', 'routes.mjs')).href
   try {
+    const before = await import(`${target}?before-delete`)
+    expect(before.default.map((route: { httpPath: string }) => route.httpPath)).toEqual(['/health', '/kept'])
+
     const start = callbacks.length
-    const route = join(root, 'routes', 'health', '+server.ts')
-    rmSync(route)
-    await vi.waitFor(() => { expect(callbacks.length).toBeGreaterThan(start) }, { timeout: 30_000 })
-    writeFileSync(route, `export const GET = () => 'healthy'`)
-    await vi.waitFor(() => { expect(callbacks.at(-1)).toBeUndefined() }, { timeout: 30_000 })
+    rmSync(join(root, 'routes', 'health', '+server.ts'))
+    await vi.waitFor(() => {
+      expect(callbacks.length).toBeGreaterThan(start)
+      expect(callbacks.at(-1)).toBeUndefined()
+    }, { timeout: 30_000 })
+
+    const after = await import(`${target}?after-delete`)
+    expect(after.default.map((route: { httpPath: string }) => route.httpPath)).toEqual(['/kept'])
   } finally { await watcher.close() }
 })
 
 test('watch ignores tooling and dependency output writes', { timeout: 120_000 }, async () => {
-  // Tooling output writes must not start a compile.
   const root = fixture(); const callbacks: (Error | undefined)[] = []
   const watcher = await watchRouteManifest(root, 'routes', (error) => callbacks.push(error))
   try {

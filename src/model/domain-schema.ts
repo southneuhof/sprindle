@@ -138,12 +138,7 @@ function validateEntityRelations({
     const relation = relations[field]
     if (!relation) throw new Error(`Missing Drizzle relation for select field "${field}" on entity "${entity.name}".\nAdd a relation named "${field}" in defineRelationsPart().`)
 
-    if (nested.isArray && !is(relation, Many)) {
-      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" is one, but schemas.select.${field} is an array.`)
-    }
-    if (!nested.isArray && !is(relation, One)) {
-      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" is many, but schemas.select.${field} is not an array.`)
-    }
+    validateRelationCardinality({ relation, field, entityName: entity.name, schemaName: 'select', isArray: nested.isArray })
     const targetTable = (relation as { targetTable?: unknown }).targetTable
     if (targetTable !== nested.entity.table) {
       throw new Error(`Target entity mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" targets table "${getTableName(targetTable as never)}".\nschemas.select.${field} uses entity "${nested.entity.name}".`)
@@ -184,12 +179,7 @@ function validateWriteSchema({
     if (!relation) throw new Error(`Unknown ${schemaName} field "${field}" on entity "${entity.name}".\n\nNested write fields must match a Drizzle relation.`)
 
     const isArray = isZodArray(unwrapZod(schema))
-    if (isArray && !is(relation, Many)) {
-      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" is one, but schemas.${schemaName}.${field} is an array.`)
-    }
-    if (!isArray && !is(relation, One)) {
-      throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entity.name}".\n\nDrizzle relation "${field}" is many, but schemas.${schemaName}.${field} is not an array.`)
-    }
+    validateRelationCardinality({ relation, field, entityName: entity.name, schemaName, isArray })
 
     const targetTable = (relation as { targetTable?: unknown }).targetTable
     const targetEntity = entityByTable.get(targetTable)
@@ -198,6 +188,28 @@ function validateWriteSchema({
     relationFields.push(createRelationField({ field, relation, targetEntity, isArray, entityName: entity.name }))
   }
   return relationFields
+}
+
+function validateRelationCardinality({
+  relation,
+  field,
+  entityName,
+  schemaName,
+  isArray,
+}: {
+  relation: unknown
+  field: string
+  entityName: string
+  schemaName: 'select' | 'create' | 'update'
+  isArray: boolean
+}) {
+  const matches = isArray ? is(relation, Many) : is(relation, One)
+  if (matches) return
+  const cardinality = isArray ? 'one' : 'many'
+  const fieldType = isArray ? 'an array' : 'not an array'
+  throw new Error(`Cardinality mismatch for relation "${field}" on entity "${entityName}".
+
+Drizzle relation "${field}" is ${cardinality}, but schemas.${schemaName}.${field} is ${fieldType}.`)
 }
 
 function createRelationField({

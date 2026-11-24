@@ -58,6 +58,24 @@ test('maps incomplete edits and add, move, and delete changes to source files', 
   language.close()
 })
 
+test('treats files named +server.ts outside the route root as ordinary TypeScript', () => {
+  const { project } = fixture()
+  const file = join(project, 'ordinary', '+server.ts')
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, 'export const value: number = 1')
+  const config = join(project, 'tsconfig.json')
+  const options = JSON.parse(readFileSync(config, 'utf8'))
+  writeFileSync(config, JSON.stringify({ ...options, include: ['**/*.ts'] }))
+
+  const language = createRouteLanguage(project)
+  try {
+    language.open(file, "export const value: number = 'wrong'")
+    expect(language.diagnostics()).toContainEqual(expect.objectContaining({ fileName: file, code: 2322 }))
+  } finally {
+    language.close()
+  }
+})
+
 test('rewrites aliases and type imports without changing offsets or comments', () => {
   const source = `// from '@southneuhof/sprindle'\nimport { defineRoute as route, type FileRouteArgs } from '@southneuhof/sprindle'\nroute(`
   const output = redirectSprindleImports(source, './.r')
@@ -133,11 +151,16 @@ test('refuses alias, computed, and imported helper property renames without edit
   language.close()
 })
 
-test('opens the actual API TypeScript project without replacing its configured roots', () => {
+test('reports diagnostics from non-route sources in the actual API TypeScript project', () => {
   const apiRoot = join(import.meta.dirname, '../../../../apps/api')
+  const file = join(apiRoot, 'src/index.ts')
   const language = createRouteLanguage(apiRoot, 'src/routes')
-  expect(() => language.diagnostics()).not.toThrow()
-  language.close()
+  try {
+    language.open(file, `${readFileSync(file, 'utf8')}\nconst sprindleProbe: number = 'wrong'\n`)
+    expect(language.diagnostics()).toContainEqual(expect.objectContaining({ fileName: file, code: 2322 }))
+  } finally {
+    language.close()
+  }
 })
 
 test('infers enriched public records and parsed create and update values', () => {

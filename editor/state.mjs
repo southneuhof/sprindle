@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { packageInputState } from '../tooling/package-state.mjs'
@@ -25,14 +26,13 @@ function readPackageIdentity(directory) {
 export function editorDependencies(editorRoot = editorRootFromModule) {
   const resolvedEditorRoot = resolve(editorRoot)
   const packageRoot = resolve(resolvedEditorRoot, '..')
-  const platformName = `typescript-${process.platform}-${process.arch}`
-  const store = resolve(resolvedEditorRoot, '../../../node_modules/.pnpm')
-  const nativePrefix = `@typescript+${platformName}@`
-  const nativeEntry = readdirSync(store).find((entry) => entry.startsWith(nativePrefix))
-  if (!nativeEntry) throw new Error(`Missing @typescript/${platformName}.`)
+  const compiler = realpathSync(join(packageRoot, 'node_modules/typescript'))
+  const nativeName = `@typescript/typescript-${process.platform}-${process.arch}`
+  const requireFromCompiler = createRequire(join(compiler, 'package.json'))
+  const native = dirname(realpathSync(requireFromCompiler.resolve(`${nativeName}/package.json`)))
   const sources = [
-    ['typescript', realpathSync(join(packageRoot, 'node_modules/typescript'))],
-    [`@typescript/${platformName}`, realpathSync(join(store, nativeEntry, `node_modules/@typescript/${platformName}`))],
+    ['typescript', compiler],
+    [nativeName, native],
     ['@babel/parser', realpathSync(join(packageRoot, 'node_modules/@babel/parser'))],
     ...['hono', 'zod', 'jsonc-parser'].map((name) => [name, realpathSync(join(packageRoot, 'node_modules', name))]),
   ]
@@ -89,7 +89,7 @@ function requiredEditorPayloads(editorRoot) {
     'extension.cjs',
     'dist/language-server.mjs',
     'dist-types/index.d.ts',
-    'routes/definition.ts',
+    'dist-types/routes/definition.d.ts',
     'node_modules/typescript/bin/tsc',
     'node_modules/typescript/lib/version.cjs',
     `node_modules/@typescript/${platformName}/package.json`,

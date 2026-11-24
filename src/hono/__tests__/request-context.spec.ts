@@ -1,8 +1,7 @@
 import { defineFileModelFixture, testDefineRoute, testInstallSprindle } from '../../testing/file-manifest'
 import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
-
-
+import { validationError } from '../../errors'
 import { requestContext, sprindleOnError, type Logger } from '..'
 import type { ModelRuntimeEntity, ModelSource } from '../../source'
 
@@ -63,6 +62,20 @@ describe('requestContext', () => {
     const first = await app.request('/items/ok')
     const second = await app.request('/items/ok')
     expect(first.headers.get('x-request-id')).not.toBe(second.headers.get('x-request-id'))
+  })
+
+  it('renders known errors outside manifest routes without logging an internal error', async () => {
+    const logger: Logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const app = buildApp(logger)
+    app.get('/invalid', () => { throw validationError([{ field: 'name', message: 'Name is required.' }]) })
+
+    const response = await app.request('/invalid')
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: 'validation_error',
+      issues: [{ field: 'name', message: 'Name is required.' }],
+    })
+    expect(logger.error).not.toHaveBeenCalled()
   })
 
   it('logs failures with the request id the client saw', async () => {
