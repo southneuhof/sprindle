@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -28,7 +29,21 @@ function fixture() {
     "import { spawn } from 'node:child_process'",
     "const isGenerationWorker = String(process.argv[1] ?? '').endsWith('/generation-worker.ts') || String(process.argv[1] ?? '').endsWith('/generation-worker.js')",
     "if (isGenerationWorker) appendFileSync(process.env.SPRINDLE_GENERATION_WORKER_MARKER, JSON.stringify({ pid: process.pid, ppid: process.ppid }) + '\\n')",
-    "if (isGenerationWorker && existsSync(process.env.SPRINDLE_GENERATION_BLOCK_WORKER_FILE)) { const ownerFile = `${process.cwd()}/.sprindle/generation.lock/owner.json`; const poll = setInterval(() => { if (!existsSync(ownerFile)) return; const owner = JSON.parse(readFileSync(ownerFile, 'utf8')); if (owner.pid !== process.pid) return; clearInterval(poll); const descendant = spawn(process.execPath, ['--input-type=module', '-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); appendFileSync(process.env.SPRINDLE_GENERATION_BLOCKED_WORKER_MARKER, JSON.stringify({ pid: process.pid, ppid: process.ppid, ownerPid: owner.pid, descendantPid: descendant.pid }) + '\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0) }, 10) }",
+    "if (isGenerationWorker && existsSync(process.env.SPRINDLE_GENERATION_BLOCK_WORKER_FILE)) {",
+    "  const ownerFile = `${process.cwd()}/.sprindle/generation.lock/owner.json`",
+    "  const poll = setInterval(() => {",
+    "    let owner",
+    "    try { owner = JSON.parse(readFileSync(ownerFile, 'utf8')) } catch (error) {",
+    "      if (error.code === 'ENOENT' || error instanceof SyntaxError) return",
+    "      throw error",
+    "    }",
+    "    if (owner.pid !== process.pid) return",
+    "    clearInterval(poll)",
+    "    const descendant = spawn(process.execPath, ['--input-type=module', '-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+    "    appendFileSync(process.env.SPRINDLE_GENERATION_BLOCKED_WORKER_MARKER, JSON.stringify({ pid: process.pid, ppid: process.ppid, ownerPid: owner.pid, descendantPid: descendant.pid }) + '\\n')",
+    "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)",
+    "  }, 10)",
+    "}",
     "if (process.execArgv.some((value) => value.includes('sprindle-resolution:')) && existsSync(process.env.SPRINDLE_GENERATION_BLOCK_FILE)) appendFileSync(process.env.SPRINDLE_GENERATION_MARKER_FILE, JSON.stringify({ pid: process.pid, ppid: process.ppid }) + '\\n'), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)",
     '',
   ].join('\n'))
@@ -122,7 +137,10 @@ function startWatcher(root: string, blockFile: string, markerFile: string, worke
 
 function recordedRecords(file: string) {
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as { pid: number; ppid?: number; descendantPid?: number })
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .slice(0, -1)
+    .map((line) => JSON.parse(line) as { pid: number; ppid?: number; ownerPid?: number; descendantPid?: number })
 }
 
 function recordedPids(file: string) {
@@ -147,8 +165,9 @@ test('SIGTERM stops a watcher while its owned runtime resolver is blocked', { ti
     await waitFor(() => output().includes('READY'), 'the watcher to compile and become ready', 15_000, output)
     writeFileSync(blockFile, 'block')
     writeFileSync(join(root, 'routes/health/+server.ts'), `import { basename } from 'node:path';export const GET=()=>basename('/health')`)
-    await waitFor(() => existsSync(markerFile), 'the runtime probe to reach the controlled block', 15_000, output)
-    const probe = JSON.parse(readFileSync(markerFile, 'utf8').trim()) as { pid: number; ppid: number }
+    await waitFor(() => recordedPids(markerFile).length > 0, 'the runtime probe to reach the controlled block', 15_000, output)
+    const [probe] = recordedRecords(markerFile)
+    assert(probe)
     const lockOwner = JSON.parse(readFileSync(join(root, '.sprindle/generation.lock/owner.json'), 'utf8')) as { pid: number }
     expect(probe.ppid).toBe(lockOwner.pid)
     const started = Date.now()
@@ -181,20 +200,23 @@ test('watcher disconnect stops a synchronous generation owner and its descendant
     mkdirSync(join(reports, 'create'), { recursive: true })
     writeFileSync(movedRoute, `export const GET=()=>'/changed'`)
     rmSync(route)
-    await waitFor(() => existsSync(generatorMarker), 'the generation worker to block while owning the lock', 15_000, () => `${output()}\ngate=${existsSync(blockWorkerFile)}\nworkers=${existsSync(workerMarker) ? readFileSync(workerMarker, 'utf8') : 'missing'}\nlock=${existsSync(join(root, '.sprindle/generation.lock/owner.json')) ? readFileSync(join(root, '.sprindle/generation.lock/owner.json'), 'utf8') : 'missing'}`)
-    const blocked = JSON.parse(readFileSync(generatorMarker, 'utf8').trim()) as { pid: number; ppid: number; ownerPid: number; descendantPid: number }
+    await waitFor(() => recordedPids(generatorMarker).length > 0, 'the generation worker to block while owning the lock', 15_000, () => `${output()}\ngate=${existsSync(blockWorkerFile)}\nworkers=${existsSync(workerMarker) ? readFileSync(workerMarker, 'utf8') : 'missing'}\nlock=${existsSync(join(root, '.sprindle/generation.lock/owner.json')) ? readFileSync(join(root, '.sprindle/generation.lock/owner.json'), 'utf8') : 'missing'}`)
+    const [blocked] = recordedRecords(generatorMarker)
+    assert(blocked)
+    const { ppid, descendantPid } = blocked
+    assert(ppid && descendantPid)
     const lockOwner = JSON.parse(readFileSync(join(root, '.sprindle/generation.lock/owner.json'), 'utf8')) as { pid: number }
     expect(blocked.pid).toBe(lockOwner.pid)
-    expect(blocked.ppid).not.toBe(child.pid)
-    expect(isAlive(blocked.ppid)).toBe(true)
+    expect(ppid).not.toBe(child.pid)
+    expect(isAlive(ppid)).toBe(true)
     expect(blocked.ownerPid).toBe(blocked.pid)
-    expect(isAlive(blocked.descendantPid)).toBe(true)
+    expect(isAlive(descendantPid)).toBe(true)
     expect(readFileSync(target, 'utf8')).toBe(previousRuntime)
     const started = Date.now()
     child.kill('SIGKILL')
     const closed = await waitForClose(child, 5000)
     expect(closed, `watcher did not stop within 5 seconds after forced parent exit (${Date.now() - started} ms).\n${output()}`).toBe(true)
-    await waitFor(() => !isAlive(blocked.pid) && !isAlive(blocked.ppid) && !isAlive(blocked.descendantPid), 'the generation supervisor, owner, and descendant to exit', 5000, () => `${output()}\nsupervisor ${blocked.ppid} alive=${isAlive(blocked.ppid)}; generator ${blocked.pid} alive=${isAlive(blocked.pid)}; descendant ${blocked.descendantPid} alive=${isAlive(blocked.descendantPid)}`)
+    await waitFor(() => !isAlive(blocked.pid) && !isAlive(ppid) && !isAlive(descendantPid), 'the generation supervisor, owner, and descendant to exit', 5000, () => `${output()}\nsupervisor ${ppid} alive=${isAlive(ppid)}; generator ${blocked.pid} alive=${isAlive(blocked.pid)}; descendant ${descendantPid} alive=${isAlive(descendantPid)}`)
     expect(readFileSync(target, 'utf8')).toBe(previousRuntime)
     await expect(compileRouteManifest(root, 'routes', '.sprindle/routes.mjs', false)).resolves.toBe(target)
     expect(existsSync(join(root, '.sprindle/generation.lock'))).toBe(false)
@@ -224,8 +246,9 @@ test('a timed out generation stops before a later route edit publishes', { timeo
     const previousRuntime = readFileSync(target, 'utf8')
     writeFileSync(blockFile, 'block')
     writeFileSync(route, `import { basename } from 'node:path';export const GET=()=>basename('/reports')`)
-    await waitFor(() => existsSync(markerFile), 'the resolver to block while holding generation ownership', 10_000, output)
-    const probe = JSON.parse(readFileSync(markerFile, 'utf8').trim()) as { pid: number; ppid: number }
+    await waitFor(() => recordedPids(markerFile).length > 0, 'the resolver to block while holding generation ownership', 10_000, output)
+    const [probe] = recordedRecords(markerFile)
+    assert(probe)
     const lockOwner = JSON.parse(readFileSync(join(root, '.sprindle/generation.lock/owner.json'), 'utf8')) as { pid: number }
     expect(probe.ppid).toBe(lockOwner.pid)
     await waitFor(() => output().includes('timed out after 12000 ms'), 'the watcher to report the generation timeout', 15_000, output)
@@ -300,8 +323,9 @@ test('a direct runtime resolver call can cancel its blocked Node probe', { timeo
   child.stderr?.setEncoding('utf8').on('data', (value) => output += value)
   try {
     writeFileSync(blockFile, 'block')
-    await waitFor(() => existsSync(markerFile), 'the direct runtime resolver to reach its controlled block', 10_000, () => output)
-    const probe = JSON.parse(readFileSync(markerFile, 'utf8').trim()) as { pid: number }
+    await waitFor(() => recordedPids(markerFile).length > 0, 'the direct runtime resolver to reach its controlled block', 10_000, () => output)
+    const [probe] = recordedRecords(markerFile)
+    assert(probe)
     writeFileSync(abortFile, 'abort')
     const closed = await waitForClose(child, 5000)
     expect(closed, `direct runtime resolution did not stop after cancellation.\n${output}`).toBe(true)
