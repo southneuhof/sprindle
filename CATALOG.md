@@ -20,8 +20,8 @@ Generated from source by `node scripts/generate-framework-catalog.mjs`. Do not e
 
 - `@southneuhof/sprindle/entity`: `createEntity(config)`, `isDomainEntity(value)`
   - `createEntity({ table, schemas, read })` read options: `pinnedOrder`, `searchColumns`, `virtual`
-- `@southneuhof/sprindle/source`: `lockRow(db, table, id, options?)` with options `require`, `failMessage`, `where` (adds `deletedAt IS NULL` automatically, throws 404 or 409 `invalid_transition`).
-- `@southneuhof/sprindle` errors: `class HttpError`, `isHttpError(value)`, `validationError(messageOrIssues)`, `toHttpError(error)`, `unauthorized(message?)`, `forbidden(message?)`, `notFound(message?)`
+- `@southneuhof/sprindle/source`: `lockRow<T>(db: LockDb, table: T, id: string, options?: LockRowOptions)` with options `require`, `failMessage`, `where` (adds `deletedAt IS NULL` automatically, throws 404 or 409 `invalid_transition`).
+- `@southneuhof/sprindle` errors: `new HttpError(status: number, code: string, message?: string, issues?: ErrorIssue[])`, `validationError(messageOrIssues: string | ErrorIssue[])`, `unauthorized(message?: string)`, `forbidden(message?: string)`, `notFound(message?: string)`
 
 ## App API shared helpers (`apps/api/src/`)
 
