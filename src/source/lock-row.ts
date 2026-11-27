@@ -19,6 +19,7 @@ export type LockRowOptions = {
   /** Every key must equal the locked row's value; a miss answers 409 invalid_transition. */
   require?: Record<string, unknown>
   failMessage?: string
+  where?: SQL
 }
 
 /**
@@ -37,8 +38,9 @@ export async function lockRow<T extends PgTable>(
 
   const columns = getTableColumns(table as never) as Record<string, AnyColumn>
   const liveness: SQL[] = columns.deletedAt ? [isNull(columns.deletedAt)] : []
+  const scope: SQL[] = options.where ? [options.where] : []
 
-  const rows = await db.select().from(table as never).where(and(...identity, ...liveness) as never).for('update')
+  const rows = await db.select().from(table as never).where(and(...identity, ...liveness, ...scope) as never).for('update')
   const row = rows[0] as InferSelectModel<T> | undefined
   if (!row) throw notFound()
 

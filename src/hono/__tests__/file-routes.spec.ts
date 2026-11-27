@@ -289,6 +289,27 @@ describe('file route runtime', () => {
     expect(await (await target.request('/items/one')).json()).toMatchObject({ data: { id: 'one' } })
   })
 
+  it('supports custom detail run with scope enrichment and 404 on null', async () => {
+    const entity = createTestEntity({ schemas: { select: z.object({ id: z.string(), name: z.string() }) } })
+    const scope = defineScope({
+      entity,
+      enrich: {
+        schema: z.object({ id: z.string(), name: z.string(), public: z.boolean() }),
+        run: (record) => ({ ...(record as { id: string; name: string }), public: true }),
+      },
+    })
+    const route = detail({
+      run: ({ state }) => (state.id === 'one' ? { id: state.id, name: 'Joined' } : null),
+    })
+    const target = app([entry('/items/:id', { GET: route }, [scope], ['id'])])
+    const found = await target.request('/items/one')
+    expect(found.status).toBe(200)
+    expect(await found.json()).toEqual({ data: { id: 'one', name: 'Joined', public: true } })
+    const missing = await target.request('/items/missing')
+    expect(missing.status).toBe(404)
+    expect(await missing.json()).toEqual({ error: 'not_found' })
+  })
+
   it('rejects invalid resource definitions before requests', () => {
     expect(() => app([entry('/delete/:id', { DELETE: deleteRoute() }, [], ['id'])])).toThrow('delete needs an entity scope')
     expect(() => app([entry('/items', { POST: list() })])).toThrow('list cannot be exported as POST')

@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm'
 import { PgDialect, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { HttpError } from '../../errors'
@@ -99,5 +100,17 @@ describe('lockRow', () => {
     expect(query.sql).toContain('"item_id"')
     expect(query.sql).not.toContain('deleted_at')
     expect(query.params).toEqual(['t-1', 'i-1'])
+  })
+
+  it('includes caller scope predicates when options.where is passed', async () => {
+    const row = { id: 'r-1', name: 'Alpha', statusCode: 'open', stepCode: 'report', deletedAt: null }
+    const { db, calls } = createLockDb([row])
+
+    const locked = await lockRow(db, reports, 'r-1', { where: eq(reports.statusCode, 'open') })
+
+    expect(locked).toEqual(row)
+    const query = new PgDialect().sqlToQuery(calls.where[0] as never)
+    expect(query.sql).toContain('"status_code"')
+    expect(query.params).toEqual(['r-1', 'open'])
   })
 })
