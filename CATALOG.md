@@ -30,6 +30,7 @@ Generated from source by `node scripts/generate-framework-catalog.mjs`. Do not e
 | `apps/api/src/identity.ts` | `orgIdentity(args)`, `requireOrgIdentity(args)`, `requirePathParam(args, name)`, `requirePermission(code)` |
 | `apps/api/src/schema.ts` | `optionalText`, `uploadKey`, `storedAssetSchema`, `storedAssetInput`, `selectionValues`, `selectionQuery` |
 | `apps/api/src/storage/assets.ts` | `assetRequestContext()`, `runWithAssetRequestUrl(url, callback)`, `storedAsset(key, metadata?)`, `projectStoredAssets(value)`, `publicRecord(schema, value)`, `publicRecords(schema, values)`, `storedAssetModel(schema)`, `storedAssetResponse` |
+| `apps/api/src/storage/uploads.ts` | `readMultipart(c, options)`, `withUploadedObjects(files, options)`, `streamStoredObject(key, options)` |
 | `apps/api/src/soft-delete.ts` | `softDeleteValues(columns, userId, reason?)`, `softDeleteRoute(options)` |
 | `apps/api/src/unique-violation.ts` | `isUniqueViolation(error)`, `onError(error, c)` |
 | `apps/api/src/audit.ts` | `auditStamp()` |
